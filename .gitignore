@@ -1,0 +1,14 @@
+.env
+node_modules/
+dist/
+.tools/npm-cache/
+contracts/maroo/out/
+contracts/maroo/cache/
+contracts/maroo/broadcast/
+contracts/aptos/build/
+relayer/data/
+.DS_Store
+.toolchain/
+.lib/
+contracts/maroo/lib/
+.tools/

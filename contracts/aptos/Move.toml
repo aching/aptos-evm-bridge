@@ -1,0 +1,19 @@
+[package]
+name = "okrw_bridge"
+version = "1.0.0"
+authors = []
+
+[addresses]
+okrw_bridge = "_"
+
+[dev-addresses]
+okrw_bridge = "0xCAFE"
+
+[dependencies.AptosFramework]
+git = "https://github.com/aptos-labs/aptos-framework.git"
+# Pinned for reproducible builds (was: rev = "mainnet").
+# Bump deliberately: update hash, run aptos move test, commit.
+rev = "04611dd2cec1f5b7ef21c2cc151e05c587a2ce19"
+subdir = "aptos-framework"
+
+[dev-dependencies]

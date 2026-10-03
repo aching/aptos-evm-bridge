@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OKRW Bridge — Maroo ↔ Aptos Demo</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --txt:#e6edf3; --dim:#8b949e;
+          --acc:#1f6feb; --green:#3fb950; --amber:#d29922; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .wrap { max-width:960px; margin:0 auto; padding:28px 20px 60px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .sub { color:var(--dim); margin:0 0 20px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:700px){ .grid{grid-template-columns:1fr;} }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 10px; }
+  .bal { font-size:26px; font-weight:650; }
+  .bal small { font-size:13px; color:var(--dim); font-weight:400; }
+  .addr { font-family:ui-monospace,monospace; font-size:11.5px; color:var(--dim); word-break:break-all; }
+  .flow { display:flex; align-items:stretch; gap:0; margin:18px 0; }
+  .step { flex:1; background:var(--card); border:1px solid var(--line); padding:16px; text-align:center; }
+  .step:first-child{ border-radius:10px 0 0 10px; } .step:last-child{ border-radius:0 10px 10px 0; }
+  .step + .step { border-left:none; }
+  .step .n { display:inline-block; width:26px; height:26px; border-radius:50%;
+             background:#21262d; border:1px solid var(--line); line-height:24px; margin-bottom:8px; }
+  .step.done .n { background:var(--green); border-color:var(--green); color:#04140a; }
+  .step h3 { margin:0 0 4px; font-size:15px; }
+  .step p { margin:0 0 12px; font-size:12.5px; color:var(--dim); }
+  .row { display:flex; gap:10px; align-items:center; margin:12px 0; flex-wrap:wrap; }
+  input[type=text], input[type=number] { background:#0d1117; border:1px solid var(--line); color:var(--txt);
+      border-radius:8px; padding:9px 12px; font-size:14px; width:170px; }
+  button { background:var(--acc); color:#fff; border:none; border-radius:8px;
+           padding:10px 18px; font-size:14px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:wait; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--txt); }
+  #status { min-height:22px; font-size:13.5px; color:var(--amber); margin:8px 0; }
+  #status.ok { color:var(--green); } #status.err { color:#f85149; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--dim); font-weight:600; padding:8px 10px; border-bottom:1px solid var(--line); }
+  td { padding:8px 10px; border-bottom:1px solid #21262d; vertical-align:top; }
+  td.hash { font-family:ui-monospace,monospace; font-size:11.5px; }
+  a { color:#58a6ff; text-decoration:none; } a:hover { text-decoration:underline; }
+  .pill { display:inline-block; font-size:11px; padding:2px 8px; border-radius:20px;
+          background:#21262d; border:1px solid var(--line); color:var(--dim); }
+  .pill.ok { color:var(--green); border-color:var(--green); }
+  .pill.bad { color:#f85149; border-color:#f85149; }
+  .step .st { font-size:11.5px; color:var(--amber); min-height:18px; margin-top:8px;
+              font-family:ui-monospace,monospace; word-break:break-all; }
+  .step .st.ok { color:var(--green); }
+  .mode { display:flex; gap:8px; align-items:center; margin:0 0 4px; font-size:13px; color:var(--dim); }
+  .mode label { display:flex; gap:6px; align-items:center; cursor:pointer; }
+  #wallet-box { display:none; margin-top:10px; padding-top:10px; border-top:1px solid var(--line); }
+  #wallet-box.show { display:block; }
+  #wallet-box input { width:100%; margin:4px 0; font-family:ui-monospace,monospace; font-size:12px; }
+  code.cmd { display:block; background:#0d1117; border:1px solid var(--line); border-radius:8px;
+             padding:10px 12px; font-size:11.5px; margin:8px 0; white-space:pre-wrap; word-break:break-all; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>OKRW Bridge <span class="pill">testnet demo</span> <span class="pill" id="health">health: …</span></h1>
+  <p class="sub">Maroo testnet (native tOKRW vault) ↔ Aptos testnet (managed OKRW coin) · lock/mint + trusted relayer</p>
+
+  <div class="grid">
+    <div class="card"><h2>Maroo testnet</h2>
+      <div class="bal"><span id="b-maroo-user">…</span> <small>tOKRW (user)</small></div>
+      <div class="bal" style="font-size:17px;margin-top:6px"><span id="b-vault">…</span> <small>escrowed in vault</small></div>
+      <div class="addr" id="a-vault" style="margin-top:8px"></div>
+    </div>
+    <div class="card"><h2>Aptos testnet</h2>
+      <div class="bal"><span id="b-aptos-user">…</span> <small>OKRW (user)</small></div>
+      <div class="bal" style="font-size:17px;margin-top:6px"><span id="b-aptos-relayer">…</span> <small>OKRW (relayer)</small></div>
+      <div class="addr" id="a-coin" style="margin-top:8px"></div>
+    </div>
+  </div>
+
+  <div class="flow">
+    <div class="step" id="s1"><span class="n">1</span><h3>Deposit on Maroo</h3>
+      <p>Lock native tOKRW in the vault</p><div class="st" id="st-s1"></div></div>
+    <div class="step" id="s2"><span class="n">2</span><h3>Relay to Aptos</h3>
+      <p id="relay-sub">Auto-relay mints each deposit oldest-first</p><div class="st" id="st-s2"></div></div>
+    <div class="step" id="s3"><span class="n">3</span><h3>Bridge back</h3>
+      <p>Burn on Aptos, unlock on Maroo</p><div class="st" id="st-s3"></div></div>
+  </div>
+
+  <div class="card">
+    <div class="mode">
+      <strong style="color:var(--txt)">Mode:</strong>
+      <label><input type="radio" name="mode" value="demo" checked /> One-click (server demo keys)</label>
+      <label><input type="radio" name="mode" value="wallet" /> My wallet (I sign deposit/transfer)</label>
+    </div>
+    <div class="row">
+      <label>Amount <input id="amt" type="number" value="0.5" min="0" step="0.1" /> tOKRW</label>
+      <label title="Aptos address receiving minted OKRW (default: demo user)">Recipient <input id="rcpt" type="text" placeholder="0x... (default demo user)" style="width:300px" /></label>
+    </div>
+    <div class="row">
+      <button id="b-deposit">1 · Deposit</button>
+      <button id="b-relay" class="ghost" title="Expedite: attest the oldest unattested deposit now">2 · Relay now</button>
+      <button id="b-back" class="ghost">3 · Bridge back</button>
+      <button id="b-refresh" class="ghost">↻ Balances</button>
+    </div>
+    <div id="wallet-box">
+      <div style="font-size:13px;color:var(--dim)">Wallet mode: run each signing step with your own keys, then continue below. One-click relay/burn/release still run server-side.</div>
+      <label style="font-size:12px">My Maroo address <input id="w-maroo" type="text" placeholder="0x…" /></label>
+      <label style="font-size:12px">My Aptos address <input id="w-aptos" type="text" placeholder="0x…" /></label>
+      <div id="wallet-cmd"></div>
+    </div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h2>Relay queue <span class="pill" id="queue-count"></span></h2>
+    <table><thead><tr><th>Nonce</th><th>Amount</th><th>Recipient</th><th>Status</th><th>Maroo tx</th></tr></thead>
+    <tbody id="queue"><tr><td colspan="5" style="color:var(--dim)">Loading…</td></tr></tbody></table>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h2>Security controls <span class="pill" id="sec-state">loading…</span></h2>
+    <div style="font-size:12.5px;color:var(--dim);margin-bottom:10px">USDC-grade rails on the Aptos coin: pause, denylist, daily caps, emergency pause. Signed server-side with the demo role keys. <span id="sec-caps"></span></div>
+    <div class="row">
+      <button id="b-pause-coin" class="ghost">Pause coin</button>
+      <button id="b-unpause-coin" class="ghost">Unpause coin</button>
+      <button id="b-pause-bridge" class="ghost">Pause bridge</button>
+      <button id="b-unpause-bridge" class="ghost">Unpause bridge</button>
+      <button id="b-emergency" style="background:#a40e26">Emergency pause (both)</button>
+    </div>
+    <div class="row">
+      <label>Address <input id="sec-addr" type="text" placeholder="0x… Aptos address" style="width:300px" /></label>
+      <button id="b-deny" class="ghost">Denylist</button>
+      <button id="b-undeny" class="ghost">Undenylist</button>
+      <button id="b-check" class="ghost" title="Check pause + denylist state">↻ State</button>
+    </div>
+    <div class="row">
+      <label>Daily mint cap <input id="sec-cap" type="number" value="15" min="0" step="1" style="width:90px" /> OKRW</label>
+      <button id="b-cap" class="ghost">Set cap</button>
+      <button id="b-recover" class="ghost" title="Release escrow stranded by burns whose Maroo release never landed">Recover stranded escrow</button>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <h2>Activity</h2>
+    <table><thead><tr><th>Time</th><th>Step</th><th>Detail</th><th>Transactions</th></tr></thead>
+    <tbody id="hist"><tr><td colspan="4" style="color:var(--dim)">No activity yet — run a step above.</td></tr></tbody></table>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (wei) => (Number(BigInt(wei)) / 1e18).toFixed(4);
+const short = (h) => h ? h.slice(0,10) + "…" + h.slice(-6) : "";
+let LINKS = { aptos:"", maroo:"" }, lastDepositBlock = null, CFG = null, watchedNonce = null;
+let tickerTimers = {};
+
+async function api(path, body) {
+  const r = await fetch(path, { method: body ? "POST" : "GET",
+    headers: {"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json();
+  if (!r.ok) {
+    // Structured server errors: { code, title, hint, retryable, raw }.
+    const e = j.error;
+    if (e && typeof e === "object" && e.title) {
+      const err = new Error(`${e.title} — ${e.hint}`);
+      err.friendly = e;
+      throw err;
+    }
+    throw new Error(typeof e === "string" ? e : ("HTTP " + r.status));
+  }
+  return j;
+}
+function status(msg, cls="") { const s=$("status"); s.textContent=msg; s.className=cls; }
+// Rich error display: title + what-to-do, with raw detail one click away.
+function statusError(e) {
+  const s = $("status");
+  s.className = "err";
+  s.textContent = "";
+  const f = e.friendly;
+  if (!f) { s.textContent = "Failed: " + e.message; return; }
+  const retry = f.retryable ? " (safe to retry)" : "";
+  s.append(document.createTextNode(`${f.title}${retry}. ${f.hint} `));
+  const det = document.createElement("details");
+  const sum = document.createElement("summary");
+  sum.textContent = `details (${f.code})`;
+  sum.style.cursor = "pointer";
+  det.append(sum, document.createTextNode(f.raw || ""));
+  s.append(det);
+}
+// Per-step tx state: submitted -> confirmed -> done, with elapsed timer so
+// visitors can tell *why* they're waiting (Maroo finality vs Aptos mint).
+// phase "countdown:<ms>" counts DOWN to the auto-relay wake-up instead.
+function stepState(id, phase, extra="") {
+  const el = $("st-"+id);
+  clearInterval(tickerTimers[id]);
+  if (phase === "idle") { el.textContent = ""; el.className = "st"; return; }
+  if (phase === "done") { el.textContent = "confirmed ✓ " + extra; el.className = "st ok"; return; }
+  if (phase.startsWith("countdown:")) {
+    const target = Date.now() + parseInt(phase.slice(10), 10);
+    const render = async () => {
+      // Once the wake-up fires, prefer the server's live pipeline stage
+      // (finality → submitting → confirming) for the watched nonce.
+      if (watchedNonce !== null && Date.now() >= target) {
+        try {
+          const r = await fetch(`/api/relay-status?nonce=${encodeURIComponent(watchedNonce)}`);
+          if (r.ok) {
+            const st = await r.json();
+            const label = st.stage === "finality" ? "waiting finality"
+              : st.stage === "submitting" ? "submitting mint" : "mint confirming";
+            el.textContent = `${label}... ${st.elapsedS}s ${extra}`;
+            el.className = "st";
+            return;
+          }
+        } catch { /* fall through to elapsed timer */ }
+      }
+      const left = Math.max(0, Math.round((target - Date.now()) / 1000));
+      // After the countdown hits zero, keep counting UP so visitors see how
+      // long the relay itself (finality wait + Aptos mint) is taking.
+      const elapsed = Math.round((Date.now() - target) / 1000);
+      el.textContent = left > 0 ? `auto-relay in ${left}s ${extra}` : `relaying now... ${elapsed}s ${extra}`;
+    };
+    el.className = "st"; render();
+    tickerTimers[id] = setInterval(render, 1000);
+    return;
+  }
+  const t0 = Date.now();
+  const render = () => { el.textContent = `${phase}… ${Math.round((Date.now()-t0)/1000)}s ${extra}`; };
+  el.className = "st"; render();
+  tickerTimers[id] = setInterval(render, 1000);
+}
+const mode = () => document.querySelector('input[name=mode]:checked').value;
+const customRcpt = () => { const v = $("rcpt").value.trim(); return v.length ? v : null; };
+function walletCmd(html) { $("wallet-cmd").innerHTML = html; }
+function txLinks(h) {
+  const out = [];
+  if (h.marooTx) out.push(`<a target="_blank" href="${LINKS.maroo}/${h.marooTx}">Maroo ${short(h.marooTx)}</a>`);
+  if (h.aptosTx) out.push(`<a target="_blank" href="${LINKS.aptos}/${h.aptosTx}?network=testnet">Aptos ${short(h.aptosTx)}</a>`);
+  return out.join("<br>") || "—";
+}
+async function refresh() {
+  try {
+    // In wallet/custom-recipient mode, track that address's OKRW balance.
+    const rcpt = customRcpt();
+    const balUrl = rcpt ? `/api/balances?aptosUser=${encodeURIComponent(rcpt)}` : "/api/balances";
+    const [b, hist, queue] = await Promise.all([
+      api(balUrl), api("/api/history"),
+      api("/api/pending").catch(() => null),
+    ]);
+    // Health uses a raw fetch: /api/health returns 503 when issues exist,
+    // and api() throws on non-2xx — which would freeze the pill exactly when
+    // there's something to show. Parse the body regardless of status.
+    let health = null;
+    try {
+      const hr = await fetch("/api/health");
+      health = await hr.json();
+    } catch { /* pill keeps last state */ }
+    $("b-maroo-user").textContent = fmt(b.marooUser);
+    $("b-vault").textContent = fmt(b.vaultEscrow);
+    $("b-aptos-user").textContent = fmt(b.aptosUser) + (rcpt && b.aptosUserWatched === rcpt ? " (watched)" : "");
+    $("b-aptos-relayer").textContent = fmt(b.aptosRelayer);
+    const hp = $("health");
+    if (health) {
+      hp.textContent = health.ok ? "health: ok" : `health: ${health.issues.length} issue(s)`;
+      hp.className = "pill " + (health.ok ? "ok" : "bad");
+      hp.title = health.issues.map(i => `[${i.level}] ${i.check}: ${i.detail}`).join("\n") ||
+        `escrow ${health.vaultEscrow} = supply ${health.aptosSupply}`;
+    }
+    const tb = $("hist");
+    tb.innerHTML = hist.length ? hist.map(h =>
+      `<tr><td>${h.time.slice(11,19)}</td><td><span class="pill">${h.step}</span></td><td>${h.detail}</td><td class="hash">${txLinks(h)}</td></tr>`
+    ).join("") : `<tr><td colspan="4" style="color:var(--dim)">No activity yet.</td></tr>`;
+    // Relay queue: oldest-first, with attested status per nonce.
+    const qb = $("queue"), qc = $("queue-count");
+    if (queue) {
+      const pend = queue.filter(q => !q.attested).length;
+      qc.textContent = pend ? `${pend} pending` : "all attested";
+      qc.className = "pill" + (pend ? "" : " ok");
+      qb.innerHTML = queue.length ? queue.slice(-8).reverse().map(q =>
+        `<tr><td>#${q.nonce}</td><td>${fmt(q.amount)}</td><td class="hash">${short(q.recipient)}</td>` +
+        `<td>${q.attested ? '<span class="pill ok">minted</span>' : q.inFlight ? '<span class="pill">relaying…</span>' : '<span class="pill">pending</span>'}</td>` +
+        `<td class="hash"><a target="_blank" href="${LINKS.maroo}/${q.txHash}">Maroo ${short(q.txHash)}</a></td></tr>`
+      ).join("") : `<tr><td colspan="5" style="color:var(--dim)">No deposits seen in range.</td></tr>`;
+      // If we're counting down to a nonce that just got attested (auto-relay
+      // did its job), resolve step 2 to done.
+      if (watchedNonce !== null && queue.some(q => String(q.nonce) === String(watchedNonce) && q.attested)) {
+        watchedNonce = null;
+        stepState("s2", "done", "auto-relayed");
+        done("s2");
+      }
+    }
+  } catch(e){ statusError(e); }
+}
+function done(id){ $(id).classList.add("done"); $(id).querySelector(".n").textContent = "✓"; }
+const wei = () => BigInt(Math.round(parseFloat($("amt").value) * 1e18)).toString();
+
+$("b-deposit").onclick = async () => {
+  const btn = $("b-deposit"); btn.disabled = true;
+  try {
+    if (mode() === "wallet") {
+      // Wallet mode: show the exact command; user signs with their own key,
+      // then pastes the block number (or just clicks Relay with a range).
+      const rcpt = customRcpt() || $("w-aptos").value.trim() || "(your 0x Aptos address)";
+      const blk = prompt("After running the command, paste the Maroo block number of your deposit (or Cancel to relay by range):");
+      if (blk) lastDepositBlock = blk;
+      walletCmd(`<div style="font-size:12.5px">Run with <b>your</b> Maroo key, then click 2 · Relay:</div><code class="cmd">cast send ${CFG.vault} "deposit(bytes)" ${rcpt} --value ${wei()} --rpc-url https://rpc-testnet.maroo.io --private-key YOUR_MAROO_KEY</code>`);
+      status("Wallet mode: run the command above, then click Relay.", "");
+      btn.disabled = false; return;
+    }
+    status("Submitting Maroo deposit...");
+    stepState("s1", "submitted (Maroo tx)");
+    const body = { amount: wei() };
+    const rcpt = customRcpt();
+    if (rcpt) body.recipient = rcpt;
+    body.idempotencyKey = `ui-${Date.now()}`;
+    const r = await api("/api/deposit", body);
+    lastDepositBlock = r.blockNumber;
+    watchedNonce = r.nonce;
+    stepState("s1", "done", r.hash ? short(r.hash) : "");
+    // Server schedules the auto-relay wake-up ~1s after deposit confirm;
+    // count down to it on the relay card so visitors see what's next.
+    stepState("s2", "countdown:1000", `(nonce ${r.nonce})`);
+    status(`Deposited — Maroo tx ${short(r.hash)} (nonce ${r.nonce}). Auto-relay will mint it oldest-first; use "Relay now" to expedite.`, "ok");
+    done("s1");
+  } catch(e){ stepState("s1", "idle"); statusError(e); }
+  btn.disabled = false; refresh();
+};
+$("b-relay").onclick = async () => {
+  const btn = $("b-relay"); btn.disabled = true;
+  try {
+    status("Relay now: attesting oldest unattested deposit...");
+    stepState("s2", "finding oldest pending");
+    const from = lastDepositBlock ? (BigInt(lastDepositBlock) - 5n).toString() : "0";
+    // Mid-flight phase hint while the server works.
+    const hint = setTimeout(() => stepState("s2", "minting on Aptos"), 12000);
+    const r = await api("/api/relay", { fromBlock: from });
+    clearTimeout(hint);
+    stepState("s2", "done", short(r.hash));
+    status(r.replayed ? `Nonce ${r.nonce} was already attested — no double-mint.` : `Minted on Aptos (nonce ${r.nonce}) — tx ${short(r.hash)}.`, "ok");
+    done("s2");
+  } catch(e){ stepState("s2", "idle"); statusError(e); }
+  btn.disabled = false; refresh();
+};
+$("b-back").onclick = async () => {
+  const btn = $("b-back"); btn.disabled = true;
+  try {
+    if (mode() === "wallet") {
+      // Wallet mode: user transfers with their own Aptos key first.
+      walletCmd(`<div style="font-size:12.5px">1) Transfer OKRW to the relayer with <b>your</b> Aptos key:</div><code class="cmd">aptos move run --function-id 0x1::primary_fungible_store::transfer --type-args 0x1::fungible_asset::Metadata --args address:${CFG.okrwMetadata} address:${CFG.bridgeAddr} u64:${wei()} --private-key YOUR_APTOS_KEY --url https://fullnode.testnet.aptoslabs.com/v1 --assume-yes</code><div style="font-size:12.5px">2) Then click Bridge back again — the server burns + releases:</div>`);
+      if (!confirm("Have you already transferred? OK = burn+release now, Cancel = just show the command.")) {
+        status("Run the transfer command above, then click Bridge back again.", "");
+        btn.disabled = false; return;
+      }
+      status("Bridging back (skipTransfer): burn → release...");
+      stepState("s3", "burning on Aptos");
+      const r = await api("/api/bridge-back", { amount: wei(), skipTransfer: true, idempotencyKey: `ui-${Date.now()}` });
+      stepState("s3", "done", short(r.releaseHash));
+      status(`Round-trip complete — burn ${short(r.burnHash)}, release ${short(r.releaseHash)}.`, "ok");
+      done("s3");
+      btn.disabled = false; refresh(); return;
+    }
+    status("Bridging back: transfer → burn → release...");
+    stepState("s3", "transferring on Aptos");
+    const r = await api("/api/bridge-back", { amount: wei(), idempotencyKey: `ui-${Date.now()}` });
+    stepState("s3", "done", short(r.releaseHash));
+    status(`Round-trip complete — burn ${short(r.burnHash)}, release ${short(r.releaseHash)}.`, "ok");
+    done("s3");
+  } catch(e){ stepState("s3", "idle"); statusError(e); }
+  btn.disabled = false; refresh();
+};
+$("b-refresh").onclick = refresh;
+
+document.querySelectorAll('input[name=mode]').forEach(el => el.addEventListener("change", () => {
+  const wallet = mode() === "wallet";
+  $("wallet-box").classList.toggle("show", wallet);
+  if (wallet) {
+    const a = $("w-aptos").value.trim();
+    if (a && !customRcpt()) $("rcpt").value = a;
+    status("Wallet mode: deposits/transfers use YOUR keys via the commands shown.", "");
+  } else { walletCmd(""); status("", ""); }
+}));
+
+// --- Security controls ---
+async function secRefresh() {
+  try {
+    const addr = $("sec-addr").value.trim();
+    const s = await api(`/api/security-status${addr ? `?account=${encodeURIComponent(addr)}` : ""}`);
+    const state = $("sec-state");
+    const frozen = s.coinPaused || s.bridgePaused;
+    state.textContent = s.coinPaused && s.bridgePaused ? "PAUSED (coin + bridge)"
+      : s.coinPaused ? "coin paused" : s.bridgePaused ? "bridge paused" : "all clear";
+    state.className = "pill" + (frozen ? " bad" : " ok");
+    $("sec-caps").textContent =
+      `Mint cap ${(Number(BigInt(s.dailyMintCap)) / 1e18).toFixed(2)}/day, used ${(Number(BigInt(s.mintedToday)) / 1e18).toFixed(2)} today.` +
+      (addr && /^0x[0-9a-fA-F]{64}$/.test(addr) ? ` ${addr.slice(0,10)}… is ${s.denylisted ? "DENYLISTED" : "not denylisted"}.` : "");
+  } catch(e){ $("sec-state").textContent = "state unavailable"; }
+}
+async function secAction(action, extra={}) {
+  status(`Security: ${action}...`);
+  try {
+    const r = await api("/api/security", { action, ...extra });
+    status(`${r.detail} — tx ${short(r.hash)}.`, "ok");
+  } catch(e){ statusError(e); }
+  secRefresh(); refresh();
+}
+$("b-pause-coin").onclick = () => secAction("pause-coin");
+$("b-unpause-coin").onclick = () => secAction("unpause-coin");
+$("b-pause-bridge").onclick = () => secAction("pause-bridge");
+$("b-unpause-bridge").onclick = () => secAction("unpause-bridge");
+$("b-emergency").onclick = () => { if (confirm("Freeze coin + bridge in one tx?")) secAction("emergency-pause"); };
+$("b-deny").onclick = () => secAction("denylist", { account: $("sec-addr").value.trim() });
+$("b-undeny").onclick = () => secAction("undenylist", { account: $("sec-addr").value.trim() });
+$("b-check").onclick = secRefresh;
+$("b-cap").onclick = () => {
+  const v = parseFloat($("sec-cap").value);
+  if (!(v > 0)) { status("Cap must be > 0.", "err"); return; }
+  secAction("set-mint-cap", { cap: BigInt(Math.round(v * 1e18)).toString() });
+};
+$("b-recover").onclick = async () => {
+  if (!confirm("Release stranded escrow (gap between vault balance and OKRW supply) to the demo user, up to today's remaining cap window?")) return;
+  status("Recovering stranded escrow...");
+  try {
+    const r = await api("/api/recover", { idempotencyKey: `ui-${Date.now()}` });
+    const rem = BigInt(r.remainder || "0");
+    status(`Recovered ${(Number(BigInt(r.released)) / 1e18).toFixed(4)} tOKRW — release ${short(r.releaseHash)}.` +
+      (rem > 0n ? ` ${(Number(rem) / 1e18).toFixed(4)} remains for the next window.` : ` Books balanced.`), "ok");
+  } catch(e){ statusError(e); }
+  refresh(); secRefresh();
+};
+
+(async () => {
+  LINKS = await api("/api/links");
+  CFG = await api("/api/config");
+  $("a-vault").textContent = "vault " + CFG.vault;
+  $("a-coin").textContent = "coin " + CFG.okrwMetadata;
+  refresh(); secRefresh(); setInterval(refresh, 15000);
+})();
+</script>
+</body>
+</html>

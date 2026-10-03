@@ -1,0 +1,1 @@
+export PATH="$PWD/.tools/foundry:$PWD/.tools/aptos:$PATH"

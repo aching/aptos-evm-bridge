@@ -1,0 +1,44 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Floating deps silently break reproducible builds. The framework must
+      # stay on a pinned rev (never a branch); solc must stay vendored.
+      # NOTE: grep -v '^#' — the comment in Move.toml mentions "mainnet".
+      - name: framework rev pinned
+        run: |
+          grep -q 'rev = "[0-9a-f]\{40\}"' contracts/aptos/Move.toml
+          ! grep -v '^#' contracts/aptos/Move.toml | grep -q 'rev = "mainnet"'
+      - name: solc pinned
+        run: grep -q 'auto_detect_solc = false' contracts/maroo/foundry.toml
+  maroo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+      - run: cd contracts/maroo && forge test
+  aptos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aptos-labs/aptos-cli-action@v1
+      - run: cd contracts/aptos && aptos move compile --dev --skip-fetch-latest-git-deps
+      - run: cd contracts/aptos && aptos move test --dev --skip-fetch-latest-git-deps
+  relayer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: relayer/package-lock.json
+      - run: cd relayer && npm ci && npm run typecheck && npm test
