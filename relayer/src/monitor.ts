@@ -77,14 +77,16 @@ export async function checkHealth(opts: {
 
   // Conservation: every minted OKRW must be backed by escrowed tOKRW.
   // (Burned amounts leave both sides equally, so escrow should equal supply.)
-  // Balances are reported for triage but NOT used as the supply figure.
-  // The two reads above run in parallel, so a transfer landing between them
-  // can produce a phantom dust gap. On ANY mismatch, re-read the pair
-  // sequentially (escrow, then supply immediately after) and only flag if
-  // the gap persists — every wei counts, but timing artifacts are not gaps.
+  // UNITS: escrowed is 18-decimal wei, Aptos supply is 8-decimal octas.
+  // Compare in octas (escrow / 1e10); a wei remainder below one octa is dust
+  // from whole-octa bridge amounts, never a gap. Comparing raw figures
+  // flagged a bogus ~6.85e18 "gap" on 2026-10-09.
+  const WEI_PER_OCTA = 10_000_000_000n;
+  const escrowOctas = escrow / WEI_PER_OCTA;
+  const escrowDustWei = escrow % WEI_PER_OCTA;
   let finalEscrow = escrow;
   let finalSupply = supply;
-  if (escrow !== supply) {
+  if (escrowOctas !== supply) {
     const escrow2 = await maroo.readContract({ address: vault, abi: ESCROW_ABI, functionName: "escrowed" });
     let supply2: bigint;
     try {
@@ -103,17 +105,26 @@ export async function checkHealth(opts: {
       ]);
       supply2 = u2 + r2;
     }
-    if (escrow2 !== supply2) {
+    if (escrow2 / WEI_PER_OCTA !== supply2) {
+      const gapOctas = escrow2 / WEI_PER_OCTA - supply2;
       issues.push({
         level: "error",
         check: "conservation",
-        detail: `vault escrow ${escrow2} != Aptos supply ${supply2} (confirmed on re-read; user ${userBal} + relayer ${relayerBal})`,
+        detail: `vault escrow ${escrow2} wei (${escrow2 / WEI_PER_OCTA} octas) != Aptos supply ${supply2} octas — gap ${(Number(gapOctas) / 1e8).toFixed(4)} OKRW (confirmed on re-read; user ${userBal} + relayer ${relayerBal})`,
       });
       finalEscrow = escrow2;
       finalSupply = supply2;
     }
     // Else the first mismatch was a read-timing race: keep the original
     // (matching-perspective) figures and do NOT flag.
+  } else if (escrowDustWei > 0n) {
+    // Whole-octa bridge amounts can leave sub-octa wei dust in the vault
+    // (e.g. ...016 from faucet/test transfers). Visible, never an error.
+    issues.push({
+      level: "warn",
+      check: "escrow-dust",
+      detail: `vault holds ${escrowDustWei} wei (< 1 octa) above whole-octa backing — dust, not a gap`,
+    });
   }
 
   // Cap exhaustion: read bridge Config + vault cap.

@@ -23,7 +23,7 @@ import { Store } from "./store.js";
 import { checkHealth } from "./monitor.js";
 import { maybeAlert } from "./alerts.js";
 import { friendlyError } from "./errors.js";
-import { createWalletClient, http, parseAbiItem, type Address, type Hash } from "viem";
+import { createWalletClient, http, parseAbiItem, getAddress, type Address, type Hash } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 // ------------------------------------------------------------------ config
@@ -67,10 +67,10 @@ const marooChain = {
   rpcUrls: { default: { http: [MAROO_RPC] } },
 } as const;
 const marooUserWallet = createWalletClient({
-  account: privateKeyToAccount(MAROO_USER_PK), transport: http(MAROO_RPC), chain: marooChain,
+  account: privateKeyToAccount(MAROO_USER_PK), transport: http(MAROO_RPC, { timeout: 30_000 }), chain: marooChain,
 });
 const marooRelayerWallet = createWalletClient({
-  account: privateKeyToAccount(MAROO_RELAYER_PK), transport: http(MAROO_RPC), chain: marooChain,
+  account: privateKeyToAccount(MAROO_RELAYER_PK), transport: http(MAROO_RPC, { timeout: 30_000 }), chain: marooChain,
 });
 
 const store = new Store(DATA_DIR);
@@ -90,6 +90,11 @@ async function withRetry<T>(label: string, fn: () => Promise<T>, tries = 4): Pro
       last = e;
       const msg = (e as Error).message;
       if (/abort|revert|denied|insufficient/i.test(msg)) throw e; // deterministic — don't retry
+      // Maroo RPC quirk: "Missing or invalid parameters" on eth_getLogs is a
+      // deterministic RPC limitation (range too wide), NOT transient — the
+      // 8-block fan-out in getDeposits handles legit ranges, so anything
+      // reaching here will fail identically on retry. Fail fast.
+      if (/Missing or invalid parameters/i.test(msg)) throw e;
       const wait = 1000 * 2 ** i;
       console.log(`[retry] ${label} attempt ${i + 1} failed (${msg.slice(0, 120)}), waiting ${wait}ms`);
       await new Promise((r) => setTimeout(r, wait));
@@ -208,6 +213,284 @@ app.post("/api/deposit", async (req, res) => {
   }
 });
 
+// ------------------------------------------------------------------ swap
+// Multi-solver auction + proven-fill (trustless) API. Swap contracts are
+// optional: endpoints 404 with a clear error until SWAP_* env is set.
+// The demo solver key doubles as the quote/fill account; the server wallet
+// submits lock/notify/finalize/prove/claim/settle on request (demo only).
+// viem validates EIP-55 checksums: normalize env addresses (often lowercase from forge output).
+const normAddr = (a: string): Address => {
+  try { return getAddress(a); } catch { return a as Address; }
+};
+const SWAP_ESCROW: Address | undefined = process.env.SWAP_ESCROW_ADDRESS ? normAddr(process.env.SWAP_ESCROW_ADDRESS) : undefined;
+const SWAP_AUCTION: Address | undefined = process.env.SWAP_AUCTION_ADDRESS ? normAddr(process.env.SWAP_AUCTION_ADDRESS) : undefined;
+const SWAP_LC: Address | undefined = process.env.SWAP_LC_ADDRESS ? normAddr(process.env.SWAP_LC_ADDRESS) : undefined;
+const swapReady = () => SWAP_ESCROW && SWAP_AUCTION && SWAP_LC;
+const needSwap = () => {
+  if (!swapReady()) throw new Error("swap contracts not configured (set SWAP_ESCROW_ADDRESS, SWAP_AUCTION_ADDRESS, SWAP_LC_ADDRESS)");
+};
+
+const ESCROW_ABI = [
+  parseAbiItem("function lock(bytes aptosRecipient, uint256 minOut, uint64 deadlineSeconds) returns (uint64)"),
+  parseAbiItem("function claimProven(uint64 swapId, bytes32 leafHash, uint64 leafIndex, bytes32[] siblings, address payoutSolver)"),
+  parseAbiItem("function settle(uint64 swapId)"),
+  parseAbiItem("function nextSwapId() view returns (uint64)"),
+] as const;
+const AUCTION_ABI = [
+  parseAbiItem("function notifyLock(uint64 swapId)"),
+  parseAbiItem("function submitQuote(uint64 swapId, uint256 aptOut, uint64 expiry, uint256 minOut)"),
+  parseAbiItem("function finalize(uint64 swapId) returns (address)"),
+  parseAbiItem("function quotes(uint64 swapId, uint256 index) view returns (address solver, uint256 aptOut, uint64 expiry)"),
+  parseAbiItem("function quoteCount(uint64 swapId) view returns (uint256)"),
+  parseAbiItem("event QuoteSubmitted(uint64 indexed swapId, address indexed solver, uint256 aptOut)"),
+  parseAbiItem("function winner(uint64) view returns (address)"),
+  parseAbiItem("function finalized(uint64) view returns (bool)"),
+  parseAbiItem("function lockTime(uint64) view returns (uint64)"),
+  parseAbiItem("function auctionWindow() view returns (uint64)"),
+  parseAbiItem("error AlreadyFinalized()"),
+] as const;
+const LC_ABI = [
+  parseAbiItem("function submitQC(bytes bcs, bytes bitmask, bytes sig)"),
+  parseAbiItem("function latestRoot() view returns (bytes32)"),
+  parseAbiItem("function latestVersion() view returns (uint64)"),
+] as const;
+
+app.get("/api/swap/config", (_req, res) => {
+  res.json({
+    ready: swapReady() === undefined ? false : true,
+    escrow: SWAP_ESCROW ?? null, auction: SWAP_AUCTION ?? null, lightClient: SWAP_LC ?? null,
+    user: marooUserWallet.account.address,
+  });
+});
+
+/** Swap status: lock + quotes + winner + light-client head + escrow claim state. */
+app.get("/api/swap/status", async (req, res) => {
+  try {
+    needSwap();
+    const swapId = BigInt(req.query.swapId as string);
+    const [lockT, fin, win, winAt, root, ver] = await Promise.all([
+      withRetry("lockTime", () => maroo.readContract({ address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "lockTime", args: [swapId] })),
+      withRetry("finalized", () => maroo.readContract({ address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "finalized", args: [swapId] })),
+      withRetry("winner", () => maroo.readContract({ address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "winner", args: [swapId] })),
+      withRetry("auctionWindow", () => maroo.readContract({ address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "auctionWindow" })),
+      withRetry("latestRoot", () => maroo.readContract({ address: SWAP_LC!, abi: LC_ABI, functionName: "latestRoot" })),
+      withRetry("latestVersion", () => maroo.readContract({ address: SWAP_LC!, abi: LC_ABI, functionName: "latestVersion" })),
+    ]);
+    const quotes: Array<{ solver: string; aptOut: string; expiry: string }> = [];
+    try {
+      const nq = Number(await withRetry("quoteCount", () => maroo.readContract({
+        address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "quoteCount", args: [swapId],
+      })) as bigint);
+      for (let i = 0; i < Math.min(nq, 25); i++) {
+        const q = await withRetry(`quotes[${i}]`, () => maroo.readContract({
+          address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "quotes", args: [swapId, BigInt(i)],
+        })) as unknown as [string, bigint, bigint];
+        quotes.push({ solver: q[0], aptOut: (q[1] as bigint).toString(), expiry: (q[2] as bigint).toString() });
+      }
+    } catch {
+      // quoteCount may not exist on older deployments — fall back to recent
+      // QuoteSubmitted events for this swap.
+      try {
+        // Maroo post-reset quirk: eth_getLogs rejects wide ranges, so scan
+        // back in 8-block windows (same shape as getDeposits in maroon.ts).
+        const quoteEv = AUCTION_ABI.find((a) => (a as { name?: string }).name === "QuoteSubmitted");
+        const head = await withRetry("getBlockNumber", () => maroo.getBlockNumber());
+        const all: Array<{ args: { swapId: bigint; solver: string; aptOut: bigint } }> = [];
+        const QSTEP = 8n;
+        for (let f = 0n; f <= head; f += QSTEP) {
+          const t = f + QSTEP - 1n > head ? head : f + QSTEP - 1n;
+          const chunk = await withRetry("quoteLogs", () => maroo.getLogs({
+            address: SWAP_AUCTION!, event: quoteEv as never, fromBlock: f, toBlock: t,
+          }));
+          all.push(...(chunk as Array<{ args: { swapId: bigint; solver: string; aptOut: bigint } }>));
+        }
+        const logs = all;
+        const best = new Map<string, { aptOut: bigint; expiry?: bigint }>();
+        for (const l of logs as Array<{ args: { swapId: bigint; solver: string; aptOut: bigint } }>) {
+          if (l.args.swapId !== swapId) continue;
+          const prev = best.get(l.args.solver);
+          if (!prev || l.args.aptOut > prev.aptOut) best.set(l.args.solver, { aptOut: l.args.aptOut });
+        }
+        for (const [solver, q] of best) quotes.push({ solver, aptOut: q.aptOut.toString(), expiry: "0" });
+      } catch { /* quotes stay empty — non-fatal */ }
+    }
+    const swap = await withRetry("swaps", () => maroo.readContract({
+      address: SWAP_ESCROW!,
+      abi: [parseAbiItem("function swaps(uint64) view returns (address user, bytes aptosRecipient, uint256 amount, uint256 minOut, uint64 deadline, bool claimed, bool refunded, bytes32 fillHash, uint64 claimableAt, address claimSolver)")],
+      functionName: "swaps", args: [swapId],
+    })) as unknown as [string, string, bigint, bigint, bigint, boolean, boolean, string, bigint, string];
+    res.json({
+      swapId: swapId.toString(),
+      lockTime: (lockT as bigint).toString(), finalized: fin as boolean, winner: win as string,
+      auctionWindow: (winAt as bigint).toString(),
+      quotes,
+      latestRoot: root as string, latestVersion: (ver as bigint).toString(),
+      escrow: {
+        user: swap[0], amount: (swap[2] as bigint).toString(), minOut: (swap[3] as bigint).toString(),
+        deadline: (swap[4] as bigint).toString(), claimed: swap[5], refunded: swap[6],
+        fillHash: swap[7], claimableAt: (swap[8] as bigint).toString(), claimSolver: swap[9],
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ error: friendlyError(e, "swap status") });
+  }
+});
+
+/** Lock ETH for a swap. Returns swapId. */
+app.post("/api/swap/lock", async (req, res) => {
+  try {
+    needSwap();
+    const amount = BigInt(req.body.amount as string);
+    if (amount <= 0n) throw new Error("amount must be > 0");
+    const recipient = toAptosRecipient(req.body.recipient as string);
+    if (!/^0x[0-9a-fA-F]{64}$/.test(recipient)) throw new Error("recipient must be a 32-byte 0x Aptos address");
+    const minOut = BigInt(req.body.minOut as string ?? "1");
+    const deadlineSeconds = BigInt(req.body.deadlineSeconds as string ?? "86400");
+    const key = `swap-lock:${req.body.idempotencyKey as string ?? `${amount}:${recipient}:${Date.now()}`}`;
+    const prior = store.getLeg(key);
+    if (prior && prior.status === "confirmed") return res.json({ swapId: prior.detail, hash: prior.marooTx, replayed: true });
+    store.putLeg({ key, status: "submitted", detail: "swap lock submitted" });
+    const nextId = await withRetry("nextSwapId", () => maroo.readContract({ address: SWAP_ESCROW!, abi: ESCROW_ABI, functionName: "nextSwapId" })) as bigint;
+    const hash = await withRetry("lock submit", () => marooUserWallet.writeContract({
+      address: SWAP_ESCROW!, abi: ESCROW_ABI, functionName: "lock",
+      args: [recipient as unknown as `0x${string}`, minOut, deadlineSeconds], value: amount,
+    } as never));
+    await waitMarooSuccess(hash);
+    store.putLeg({ key, status: "confirmed", marooTx: hash, detail: nextId.toString() });
+    store.log("swap-lock", `Swap ${nextId} locked ${(Number(amount) / 1e18).toFixed(4)} ETH -> ${shortAddr(recipient)}`, { marooTx: hash });
+    res.json({ swapId: nextId.toString(), hash });
+  } catch (e) {
+    res.status(500).json({ error: friendlyError(e, "swap lock") });
+  }
+});
+
+/** Notify the auction + submit a solver quote (demo solver key). */
+app.post("/api/swap/quote", async (req, res) => {
+  try {
+    needSwap();
+    const swapId = BigInt(req.body.swapId as string);
+    const aptOut = BigInt(req.body.aptOut as string);
+    const minOut = BigInt(req.body.minOut as string ?? "1");
+    const expiry = BigInt(req.body.expiry as string ?? `${Math.floor(Date.now() / 1000) + 86400}`);
+    const key = `swap-quote:${swapId}:${marooUserWallet.account.address}:${aptOut}`;
+    const prior = store.getLeg(key);
+    if (prior && prior.status === "confirmed") return res.json({ hash: prior.marooTx, replayed: true });
+    store.putLeg({ key, status: "submitted", detail: "quote submitted" });
+    // notifyLock's AlreadyFinalized (0x475a2535) means "already notified"
+    // (lockTime set) — but viem wraps it in ContractFunctionExecutionError
+    // whose message does NOT match /abort|revert/, so withRetry burns 4
+    // attempts (~15s) before we check chain state. Pre-check instead.
+    const alreadyNotified = await withRetry("lockTime", () => maroo.readContract({
+      address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "lockTime", args: [swapId],
+    }) as Promise<bigint>);
+    try {
+      if (alreadyNotified === 0n) {
+        const nHash = await withRetry("notifyLock", () => marooUserWallet.writeContract({
+          address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "notifyLock", args: [swapId],
+        } as never));
+        await waitMarooSuccess(nHash);
+      }
+    } catch (e) {
+      // already notified (race) — continue to quote; anything else rethrows.
+      const already = await withRetry("lockTime", () => maroo.readContract({
+        address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "lockTime", args: [swapId],
+      }) as Promise<bigint>);
+      if (already === 0n) throw e;
+    }
+    const hash = await withRetry("submitQuote", () => marooUserWallet.writeContract({
+      address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "submitQuote",
+      args: [swapId, aptOut, expiry, minOut],
+    } as never));
+    await waitMarooSuccess(hash);
+    store.putLeg({ key, status: "confirmed", marooTx: hash, detail: aptOut.toString() });
+    store.log("swap-quote", `Quote ${aptOut} octas on swap ${swapId}`, { marooTx: hash });
+    res.json({ hash });
+  } catch (e) {
+    res.status(500).json({ error: friendlyError(e, "swap quote") });
+  }
+});
+
+/** Finalize the auction (anyone may call after the window). Returns winner. */
+app.post("/api/swap/finalize", async (req, res) => {
+  try {
+    needSwap();
+    const swapId = BigInt(req.body.swapId as string);
+    const hash = await withRetry("finalize", () => marooUserWallet.writeContract({
+      address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "finalize", args: [swapId],
+    } as never));
+    const receipt = await waitMarooSuccess(hash);
+    const winner = await withRetry("winner", () => maroo.readContract({ address: SWAP_AUCTION!, abi: AUCTION_ABI, functionName: "winner", args: [swapId] })) as string;
+    store.log("swap-finalize", `Swap ${swapId} winner ${shortAddr(winner)}`, { marooTx: hash });
+    res.json({ hash, winner, blockNumber: receipt.blockNumber.toString() });
+  } catch (e) {
+    res.status(500).json({ error: friendlyError(e, "swap finalize") });
+  }
+});
+
+/** Submit a QC to the light client. Body: { bcs, bitmask, sig } as 0x hex. */
+app.post("/api/swap/submit-qc", async (req, res) => {
+  try {
+    needSwap();
+    const { bcs, bitmask, sig } = req.body as { bcs: string; bitmask: string; sig: string };
+    if (!/^0x[0-9a-fA-F]+$/.test(bcs) || !/^0x[0-9a-fA-F]+$/.test(bitmask) || !/^0x[0-9a-fA-F]+$/.test(sig)) {
+      throw new Error("bcs/bitmask/sig must be 0x hex");
+    }
+    const key = `swap-qc:${bcs.slice(0, 66)}`;
+    const prior = store.getLeg(key);
+    if (prior && prior.status === "confirmed") return res.json({ hash: prior.marooTx, replayed: true });
+    store.putLeg({ key, status: "submitted", detail: "QC submitted" });
+    // QC verification is pairing-heavy (~250M gas in tests): viem's
+    // estimation under-quotes, so set an explicit generous limit.
+    const hash = await withRetry("submitQC", () => marooUserWallet.writeContract({
+      address: SWAP_LC!, abi: LC_ABI, functionName: "submitQC",
+      args: [bcs as `0x${string}`, bitmask as `0x${string}`, sig as `0x${string}`],
+      gas: 300_000_000n,
+    } as never));
+    await waitMarooSuccess(hash);
+    const [root, ver] = await Promise.all([
+      withRetry("latestRoot", () => maroo.readContract({ address: SWAP_LC!, abi: LC_ABI, functionName: "latestRoot" })),
+      withRetry("latestVersion", () => maroo.readContract({ address: SWAP_LC!, abi: LC_ABI, functionName: "latestVersion" })),
+    ]);
+    store.putLeg({ key, status: "confirmed", marooTx: hash, detail: `v${ver}` });
+    store.log("swap-qc", `QC confirmed — latestVersion ${ver}`, { marooTx: hash });
+    res.json({ hash, latestRoot: root as string, latestVersion: (ver as bigint).toString() });
+  } catch (e) {
+    res.status(500).json({ error: friendlyError(e, "submit QC") });
+  }
+});
+
+/** Proven claim + immediate settle. Body: { swapId, leafHash, leafIndex, siblings[], payoutSolver }. */
+app.post("/api/swap/claim", async (req, res) => {
+  try {
+    needSwap();
+    const swapId = BigInt(req.body.swapId as string);
+    const leafHash = req.body.leafHash as string;
+    const leafIndex = BigInt(req.body.leafIndex as string ?? "0");
+    const siblings = req.body.siblings as string[];
+    const payoutSolver = req.body.payoutSolver as string;
+    if (!/^0x[0-9a-fA-F]{64}$/.test(leafHash)) throw new Error("leafHash must be 0x + 64 hex");
+    if (!/^0x[0-9a-fA-F]{40}$/.test(payoutSolver)) throw new Error("payoutSolver must be an EVM address");
+    const key = `swap-claim:${swapId}:${leafHash}`;
+    const prior = store.getLeg(key);
+    if (prior && prior.status === "confirmed") return res.json({ claimHash: prior.marooTx, settleHash: prior.detail, replayed: true });
+    store.putLeg({ key, status: "submitted", detail: "claimProven submitted" });
+    const claimHash = await withRetry("claimProven", () => marooUserWallet.writeContract({
+      address: SWAP_ESCROW!, abi: ESCROW_ABI, functionName: "claimProven",
+      args: [swapId, leafHash as `0x${string}`, leafIndex, siblings as `0x${string}`[], payoutSolver as `0x${string}`],
+    } as never));
+    await waitMarooSuccess(claimHash);
+    const settleHash = await withRetry("settle", () => marooUserWallet.writeContract({
+      address: SWAP_ESCROW!, abi: ESCROW_ABI, functionName: "settle", args: [swapId],
+    } as never));
+    await waitMarooSuccess(settleHash);
+    store.putLeg({ key, status: "confirmed", marooTx: claimHash, detail: settleHash });
+    store.log("swap-claim", `Swap ${swapId} proven-claimed -> ${shortAddr(payoutSolver)}`, { marooTx: claimHash });
+    res.json({ claimHash, settleHash });
+  } catch (e) {
+    res.status(500).json({ error: friendlyError(e, "proven claim") });
+  }
+});
+
 // ------------------------------------------------------------------ attest
 // Shared attestation path: idempotency check -> finality wait -> u64 check
 // -> mintAttested -> persist + log. Used by BOTH the manual /api/relay
@@ -247,10 +530,39 @@ async function attestDeposit(d: DepositEvent): Promise<{ hash: string; nonce: st
       await new Promise((r) => setTimeout(r, 1500));
     }
     if (d.amount > 18446744073709551615n) throw new Error("amount exceeds u64");
+    // Units: Maroo tOKRW is 18 decimals (wei); Aptos OKRW is u64 base units.
+    // 1 tOKRW == 1 OKRW == 1e8 octas (Aptos 8-decimal FA convention for this
+    // demo). Scale down by 1e10 on the way over; scale back up on the way back.
+    // (Pre-reset this scaling lived in the Move code; post-reset redeploy
+    // takes raw u64, so the relayer converts explicitly.)
+    const OCTAS_PER_TOKRW = 100_000_000n;
+    const WEI_PER_TOKRW = 1_000_000_000_000_000_000n;
+    if (d.amount % (WEI_PER_TOKRW / OCTAS_PER_TOKRW) !== 0n) {
+      throw new Error(`amount ${d.amount} wei is not a whole number of octas`);
+    }
+    const octas = (d.amount * OCTAS_PER_TOKRW) / WEI_PER_TOKRW;
     store.putLeg({ key, status: "submitted", detail: `relay nonce ${nonceStr}` });
+    // Preflight: simulate first so Move aborts (cap, seen, metadata) surface
+    // WITHOUT burning faucet gas on a tx that will abort. Simulation runs
+    // OUTSIDE withRetry (fail fast); only the submit retries.
+    {
+      const simTxn = await aptos.transaction.build.simple({
+        sender: aptosRelayer.accountAddress,
+        data: {
+          function: `${MODULE_ADDR}::bridge::mint_attested` as `${string}::${string}::${string}`,
+          functionArguments: [OKRW_METADATA, toAptosRecipient(d.aptosRecipient), octas.toString(), d.nonce.toString()],
+        },
+      });
+      const [sim] = await aptos.transaction.simulate.simple({
+        signerPublicKey: aptosRelayer.publicKey as never,
+        transaction: simTxn,
+      });
+      console.log(`[relay] preflight nonce ${nonceStr}: success=${sim.success} vm=${sim.vm_status}`);
+      if (!sim.success) throw new Error(`preflight abort: ${sim.vm_status}`);
+    }
     const tx = await withRetry("mintAttested", () => mintAttested(
       aptos, aptosRelayer, MODULE_ADDR, OKRW_METADATA,
-      toAptosRecipient(d.aptosRecipient), d.amount, d.nonce,
+      toAptosRecipient(d.aptosRecipient), octas, d.nonce,
       (s) => relayProgress.set(nonceStr, { stage: s, since: Date.now() }),
     )).catch((e: unknown) => {
       // Reconcile: the on-chain Seen table is authoritative. If the nonce
@@ -288,18 +600,15 @@ app.get("/api/relay-status", (req, res) => {
 
 // Oldest unattested deposit in [fromBlock, head]. Attested = in the local
 // store (fast path); the on-chain Seen table remains the authoritative guard
-// if the store was ever wiped. Scans in CHUNK-sized ranges: a single 2000+
-// block eth_getLogs times out against the Maroo RPC (and the timeout once
-// crashed the server via got internals), so large ranges are fanned out.
-const SCAN_CHUNK = BigInt(process.env.MAROO_SCAN_CHUNK ?? 250);
+// if the store was ever wiped. Range scans go through getDeposits, which fans
+// out into RPC-safe 8-block windows client-side (Maroo post-reset quirk).
 async function oldestPending(fromBlock: bigint): Promise<{ deposits: DepositEvent[]; target: DepositEvent | undefined }> {
   const head = await withRetry("getBlockNumber", () => maroo.getBlockNumber());
   if (head < fromBlock) return { deposits: [], target: undefined };
-  const deposits: DepositEvent[] = [];
-  for (let from = fromBlock; from <= head; from += SCAN_CHUNK) {
-    const to = from + SCAN_CHUNK - 1n > head ? head : from + SCAN_CHUNK - 1n;
-    deposits.push(...await withRetry("getDeposits", () => getDeposits(maroo, VAULT, from, to)));
-  }
+  // getDeposits already fans out into RPC-safe 8-block windows internally;
+  // call it ONCE for the whole range (chunking here would just multiply the
+  // same 8-block calls AND re-trigger the wide-range RPC rejection).
+  const deposits = await withRetry("getDeposits", () => getDeposits(maroo, VAULT, fromBlock, head));
   deposits.sort((a, b) => (a.nonce < b.nonce ? -1 : a.nonce > b.nonce ? 1 : 0));
   return { deposits, target: deposits.find((d) => !store.hasForward(d.nonce.toString())) };
 }
@@ -326,14 +635,14 @@ app.post("/api/relay", async (req, res) => {
 // Pending queue for the UI: recent deposits with attested status.
 app.get("/api/pending", async (req, res) => {
   try {
-    const lookback = BigInt(req.query.lookback as string ?? "5000");
+    // Default lookback is 500 blocks: the UI only shows the last 8 deposits,
+    // and wider scans fan out into hundreds of 8-block Maroo RPC windows
+    // (5000 hung the endpoint for 120s+ on 2026-10-09). Relay-by-range uses
+    // explicit fromBlock and is unaffected.
+    const lookback = BigInt(req.query.lookback as string ?? "500");
     const head = await withRetry("getBlockNumber", () => maroo.getBlockNumber());
     const from = head > lookback ? head - lookback : 0n;
-    const deposits: DepositEvent[] = [];
-    for (let f = from; f <= head; f += SCAN_CHUNK) {
-      const t = f + SCAN_CHUNK - 1n > head ? head : f + SCAN_CHUNK - 1n;
-      deposits.push(...await withRetry("getDeposits", () => getDeposits(maroo, VAULT, f, t)));
-    }
+    const deposits = await withRetry("getDeposits", () => getDeposits(maroo, VAULT, from, head));
     deposits.sort((a, b) => (a.nonce < b.nonce ? -1 : a.nonce > b.nonce ? 1 : 0));
     res.json(deposits.map((d) => ({
       nonce: d.nonce.toString(),
@@ -354,8 +663,16 @@ app.get("/api/pending", async (req, res) => {
 // with their own wallet — the server only burns + releases.
 app.post("/api/bridge-back", async (req, res) => {
   try {
-    const amount = BigInt(req.body.amount as string);
-    if (amount <= 0n) throw new Error("amount must be > 0");
+    // Units: API takes wei (18-decimal tOKRW convention); Aptos legs use
+    // octas (see attestDeposit for the forward direction).
+    const amountWei = BigInt(req.body.amount as string);
+    if (amountWei <= 0n) throw new Error("amount must be > 0");
+    const OCTAS_PER_TOKRW = 100_000_000n;
+    const WEI_PER_TOKRW = 1_000_000_000_000_000_000n;
+    if (amountWei % (WEI_PER_TOKRW / OCTAS_PER_TOKRW) !== 0n) {
+      throw new Error(`amount ${amountWei} wei is not a whole number of octas`);
+    }
+    const amount = (amountWei * OCTAS_PER_TOKRW) / WEI_PER_TOKRW;
     const marooRecipient = marooUserWallet.account.address;
     const skipTransfer = req.body.skipTransfer === true;
     const key = `back:${req.body.idempotencyKey as string ?? `${amount}:${Date.now()}`}`;
@@ -384,6 +701,8 @@ app.post("/api/bridge-back", async (req, res) => {
     }
 
     // 3b. relayer burns + releases on Maroo.
+    // (amount is octas = 8-decimal; the log line must scale by 1e8, not 1e18 —
+    // the old /1e18 printed "Burned 0.0000" for every real burn.)
     const burnRes = await withRetry("burnWithdraw", () => burnWithdraw(
       aptos, aptosRelayer, MODULE_ADDR, OKRW_METADATA,
       APTOS_USER_ADDR, amount, marooRecipient,
@@ -391,14 +710,14 @@ app.post("/api/bridge-back", async (req, res) => {
     const nonce = await withRetry("nextReleaseNonce", () => maroo.readContract({ address: VAULT, abi: RELEASE_ABI, functionName: "nextReleaseNonce" }));
     const releaseHash = await withRetry("release submit", () => marooRelayerWallet.writeContract({
       address: VAULT, abi: RELEASE_ABI, functionName: "release",
-      args: [marooRecipient, amount, nonce],
+      args: [marooRecipient, amountWei, nonce],
     }));
     await waitMarooSuccess(releaseHash); // confirmed release, not just submitted
     store.putLeg({ key, status: "confirmed", aptosTx: transferHash.startsWith("0x") ? transferHash : undefined, marooTx: releaseHash, detail: burnRes.hash });
     store.addBack(nonce.toString());
     store.log(
       "bridge-back",
-      `Burned ${(Number(amount) / 1e18).toFixed(4)} OKRW, released on Maroo`,
+      `Burned ${(Number(amount) / 1e8).toFixed(4)} OKRW, released on Maroo`,
       { aptosTx: burnRes.hash, marooTx: releaseHash },
     );
     res.json({ transferHash, burnHash: burnRes.hash, releaseHash });
@@ -457,8 +776,13 @@ app.post("/api/recover", async (req, res) => {
       aptosRelayer: aptosRelayer.accountAddress.toString(),
       bridgeAddr: BRIDGE_ADDR, moduleAddr: MODULE_ADDR,
     });
-    const gap = BigInt(report.vaultEscrow) - BigInt(report.aptosSupply);
-    if (gap <= 0n) throw new Error("no stranded escrow: vault balance does not exceed Aptos supply");
+    // UNITS: report.vaultEscrow is 18-decimal wei, aptosSupply is 8-decimal
+    // octas. The releasable gap is (escrowWholeOctas − supply) octas,
+    // converted BACK to wei for vault.release(). The pre-fix code passed
+    // (escrowWei − supplyOctas) raw — a ~entire-vault over-release.
+    const WEI_PER_OCTA = 10_000_000_000n;
+    const gapOctas = BigInt(report.vaultEscrow) / WEI_PER_OCTA - BigInt(report.aptosSupply);
+    if (gapOctas <= 0n) throw new Error("no stranded escrow: vault backing does not exceed Aptos supply");
     const CAP_ABI = [
       parseAbiItem("function dailyReleaseCap() view returns (uint256)"),
       parseAbiItem("function releasedToday() view returns (uint256)"),
@@ -469,7 +793,10 @@ app.post("/api/recover", async (req, res) => {
     ]);
     const room = (cap as bigint) - (used as bigint);
     if (room <= 0n) throw new Error("daily release window exhausted — retry after UTC midnight rollover");
-    const amount = gap < room ? gap : room;
+    // Both gap and room are wei here (gap converted back from octas); the
+    // vault accrues/withdraws wei, so the cap comparison stays in wei.
+    const gapWei = gapOctas * WEI_PER_OCTA;
+    const amount = gapWei < room ? gapWei : room;
     const to = marooUserWallet.account.address;
     store.putLeg({ key, status: "submitted", detail: `recover ${amount}` });
     const nonce = await withRetry("nextReleaseNonce", () => maroo.readContract({ address: VAULT, abi: RELEASE_ABI, functionName: "nextReleaseNonce" }));
@@ -478,7 +805,7 @@ app.post("/api/recover", async (req, res) => {
       args: [to, amount, nonce],
     }));
     await waitMarooSuccess(releaseHash);
-    const remainder = gap - amount;
+    const remainder = gapWei - amount;
     store.putLeg({ key, status: "confirmed", marooTx: releaseHash, detail: amount.toString() });
     store.addBack(nonce.toString());
     store.log("recover", `Released ${(Number(amount) / 1e18).toFixed(4)} stranded tOKRW to ${shortAddr(to)}${remainder > 0n ? ` — ${(Number(remainder) / 1e18).toFixed(4)} remains for next window` : " — books balanced"}`, { marooTx: releaseHash });
@@ -609,8 +936,14 @@ if (process.env.AUTORELAY_ENABLED !== "0") {
   const SWEEP_EVERY = 10; // every Nth tick, re-scan the lookback window (self-healing)
   let relayRunning = false; // no overlapping ticks
   let tickCount = 0;
-  const runAutoRelay = async (fromOverride?: bigint) => {
-    if (relayRunning) return;
+  const runAutoRelay = async (fromOverride?: bigint): Promise<boolean> => {
+    // Dropped work must be LOUD: a silent return here hid a 171s+ stall on
+    // 2026-10-09 (wake-up scheduled, then nothing). Returns false when
+    // skipped-busy so the deposit wake-up can retry once.
+    if (relayRunning) {
+      console.log(`[autorelay] tick skipped (previous tick still running)${fromOverride !== undefined ? ` for block ${fromOverride}` : ""} — next tick covers it`);
+      return false;
+    }
     relayRunning = true;
     try {
       tickCount += 1;
@@ -636,20 +969,39 @@ if (process.env.AUTORELAY_ENABLED !== "0") {
       }
       if (head < from) {
         if (head > (store.lastBlock ?? -1n)) store.lastBlock = head;
-        return;
+        return true;
       }
       // Process ALL unattested deposits oldest-first within the tick, then
       // advance the cursor past the whole range. (Processing one per tick
       // and persisting head would strand everything in between.)
+      // A scan failure must NOT advance the cursor past unscanned blocks:
+      // oldestPending throws on RPC errors (fail-fast, no silent skip), so
+      // the cursor only moves after a successful full-range scan below.
       const { deposits } = await oldestPending(from);
       const pending = deposits.filter((d) => !store.hasForward(d.nonce.toString()));
       for (const d of pending) {
         console.log(`[autorelay] attesting nonce ${d.nonce} (${(Number(d.amount) / 1e18).toFixed(4)} OKRW)`);
-        await attestDeposit(d);
+        // Wedge guard: bound each attestation so a hung RPC can never hold
+        // relayRunning forever again. On timeout the tick fails loudly, the
+        // flag clears in finally, and the next tick reconciles idempotently
+        // (on-chain Seen table + EALREADY_ATTESTED adoption).
+        let attestTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            attestDeposit(d),
+            new Promise<never>((_, rej) => {
+              attestTimer = setTimeout(() => rej(new Error(`attest timeout (180s) for nonce ${d.nonce}`)), 180_000);
+            }),
+          ]);
+        } finally {
+          clearTimeout(attestTimer);
+        }
       }
       if (head > (store.lastBlock ?? -1n)) store.lastBlock = head;
+      return true;
     } catch (e) {
       console.error(`[autorelay] tick failed (will retry): ${(e as Error).message.slice(0, 200)}`);
+      return true; // ran (and failed loudly); the 60s safety net retries
     } finally {
       relayRunning = false;
     }
@@ -663,7 +1015,12 @@ if (process.env.AUTORELAY_ENABLED !== "0") {
   (globalThis as Record<string, unknown>).__relayWake = (depositBlock: bigint) => {
     const waitMs = 1000; // attestDeposit enforces finality precisely; this just yields to block propagation
     console.log(`[autorelay] wake-up scheduled for block ${depositBlock} in ${waitMs}ms`);
-    setTimeout(() => void runAutoRelay(depositBlock), waitMs);
+    setTimeout(async () => {
+      const ran = await runAutoRelay(depositBlock);
+      // If a sweep tick was running, retry once after it likely finished —
+      // keeps deposit→mint latency at seconds, not "next 60s tick".
+      if (!ran) setTimeout(() => void runAutoRelay(depositBlock), 20_000);
+    }, waitMs);
   };
 }
 

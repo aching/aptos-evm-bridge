@@ -1,4 +1,4 @@
-# Maroo OKRW ↔ Aptos Bridge (demo)
+# Move Bridge — Maroo OKRW ↔ Aptos (demo)
 
 Lock/mint + trusted-relayer demo bridge for the Won stablecoin between
 **Maroo testnet** (native tOKRW, chain ID 450815) and **Aptos testnet**.
@@ -122,10 +122,30 @@ cd relayer && npm run forward   # watches vault, mints on Aptos
 ./scripts/balances.sh
 ```
 
+## 6b. Proven-fill demo (trustless settlement, no challenge wait)
+
+```bash
+# 1. Anchor the Aptos validator set (admin; from the stake resource):
+#    lc.anchor(epoch, pubkeys[48B compressed G1…], powers[…])
+# 2. Solver fills on Aptos, then anyone submits the QC + inclusion proof:
+#    lc.submitQC(bcs129, bitmask, aggSig96)          # verifies aggregate BLS, records latestRoot
+#    escrow.claimProven(id, leafHash, leafIndex, siblings, winner)  # verifies inclusion, binds auction winner
+#    escrow.settle(id)                               # immediate — no challenge window
+# 3. Build args off-chain:
+cd swap && node src/lc-oracle.mjs                    # regen QC vectors -> /tmp/lc-vec.json
+npx tsx --test test/prover.test.ts                   # 5 prover tests (leaf/fold/BCS pinned to forge vectors)
+```
+
+See `research/swap-plan-2026-10-07.md` §9 for the cryptography (POP-DST BLS,
+NIST SHA3 accumulator, BCS layout), the oracle regen commands, and the
+via_ir codegen rules. Forge suite: `contracts/maroo` 114 tests
+(`AptosLightClient` 25, `SwapProvenE2E` 5, auction 12, committee 11, BLS 8).
+
 ## Tests
 
 ```bash
-cd contracts/maroo && forge test                      # 24 tests (incl. invariant fuzz)
+cd contracts/maroo && forge test                      # 114 tests (light client + proven e2e incl.)
+cd swap && npm test                                    # 9 tests (4 existing + 5 prover)
 cd contracts/aptos && aptos move test --dev --skip-fetch-latest-git-deps  # 17 tests
 cd relayer && ./node_modules/.bin/tsc --noEmit
 ./scripts/e2e-regression.sh 0.2   # live testnet round-trip + conservation + idempotency

@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Swap — ETH → APT (proven)</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg:#131313; --card:#1e1e1e; --line:#2c2c2c; --txt:#f2f2f2; --dim:#9a9a9a;
+          --red:#f6465d; --green:#2ebd85; --blue:#4a7ddb; --btn:#3a3a3a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .wrap { max-width:480px; margin:0 auto; padding:18px 14px 60px; }
+  .top { display:flex; align-items:center; justify-content:space-between; margin-bottom:22px; }
+  .top h1 { font-size:23px; font-weight:600; margin:0; }
+  .icons { display:flex; gap:8px; }
+  .icon { width:38px; height:38px; border-radius:9px; background:#2a2118; color:#f0b90b;
+          display:flex; align-items:center; justify-content:center; font-size:18px; }
+  .icon.user { background:#2a2a2a; color:#cfcfcf; }
+  .tabs { display:flex; gap:22px; border-bottom:1px solid var(--line); margin-bottom:0; }
+  .tab { padding:10px 2px; color:var(--dim); font-size:16px; font-weight:500; cursor:pointer;
+         border-bottom:2px solid transparent; margin-bottom:-1px; }
+  .tab.on { color:var(--txt); border-bottom-color:var(--txt); }
+  .beta { font-size:11px; background:#1e3a5f; color:#6ea8fe; border-radius:6px;
+          padding:2px 7px; margin-left:6px; font-weight:600; }
+  .card { background:var(--card); border:1.5px solid var(--line); border-radius:16px;
+          padding:14px 16px 12px; position:relative; }
+  .card.sell { border-color:var(--line); margin-top:18px; border-radius:16px 16px 0 0; border-bottom:none; }
+  .card.sell.err { border-color:var(--red); }
+  .card.buy { border-radius:0 0 16px 16px; padding-top:22px; }
+  .lab { display:flex; justify-content:space-between; font-size:13px; color:var(--dim); margin-bottom:2px; }
+  .lab .warn { color:var(--red); font-weight:600; }
+  .amt { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .amt input { background:transparent; border:none; color:var(--txt); font-size:30px; font-weight:500;
+               width:100%; outline:none; padding:2px 0; }
+  .amt input::placeholder { color:#5a5a5a; }
+  .tok { display:flex; align-items:center; gap:6px; background:#2c2c2c; border-radius:20px;
+         padding:6px 6px 6px 8px; font-size:15px; font-weight:600; white-space:nowrap; cursor:pointer;
+         border:none; color:var(--txt); }
+  .tok .dot { width:24px; height:24px; border-radius:50%; display:inline-flex; align-items:center;
+              justify-content:center; font-size:13px; font-weight:700; }
+  .dot.eth { background:#627eea; color:#fff; } .dot.apt { background:#000; color:#fff; border:1px solid #444; }
+  .sub { display:flex; justify-content:space-between; font-size:13px; color:var(--dim); margin-top:2px; }
+  .flip { position:absolute; left:50%; bottom:-19px; transform:translateX(-50%); width:38px; height:38px;
+          border-radius:50%; background:#1e1e1e; border:1.5px solid var(--line); color:var(--dim);
+          font-size:16px; cursor:pointer; z-index:2; }
+  .go { width:100%; margin-top:22px; background:#3a3a3a; color:#d8d8d8; border:none; border-radius:12px;
+        padding:15px; font-size:16px; font-weight:600; cursor:pointer; }
+  .go.live { background:var(--blue); color:#fff; }
+  .go:disabled { opacity:.55; cursor:wait; }
+  .meta { margin-top:20px; font-size:14px; }
+  .meta .r { display:flex; justify-content:space-between; padding:5px 0; color:var(--dim); }
+  .meta .r b { color:var(--txt); font-weight:500; }
+  .meta .r b.hl { font-variant-numeric:tabular-nums; }
+  .slip { background:#2c2c2c; border-radius:7px; padding:2px 8px; font-size:13px; }
+  details.steps { margin-top:18px; background:var(--card); border:1px solid var(--line);
+                  border-radius:12px; padding:10px 14px; font-size:13.5px; }
+  details.steps summary { cursor:pointer; color:var(--dim); font-weight:600; }
+  .step { display:flex; gap:8px; align-items:baseline; padding:6px 0; border-top:1px solid var(--line); }
+  .step:first-of-type { border-top:none; }
+  .step .dot2 { width:8px; height:8px; border-radius:50%; background:#555; flex:none; transform:translateY(-1px); }
+  .step.done .dot2 { background:var(--green); } .step.err .dot2 { background:var(--red); }
+  .step .h { font-family:ui-monospace,monospace; font-size:11px; color:var(--dim); word-break:break-all; }
+  .row2 { display:flex; gap:8px; margin-top:10px; }
+  .row2 input { flex:1; background:#131313; border:1px solid var(--line); color:var(--txt);
+                border-radius:8px; padding:8px 10px; font-size:12.5px; font-family:ui-monospace,monospace; }
+  .row2 button { background:#2c2c2c; color:var(--txt); border:none; border-radius:8px;
+                 padding:8px 12px; font-size:13px; cursor:pointer; }
+  #qtable { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
+  #qtable td { padding:5px 4px; border-top:1px solid var(--line); font-variant-numeric:tabular-nums; }
+  #qtable td.w { color:var(--green); font-weight:600; }
+  textarea.proof { width:100%; min-height:76px; background:#131313; border:1px solid var(--line);
+                   color:var(--txt); border-radius:8px; padding:8px 10px; font-size:11.5px;
+                   font-family:ui-monospace,monospace; margin-top:8px; }
+  .note { font-size:12px; color:var(--dim); margin-top:14px; }
+  a { color:#6ea8fe; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><h1>Swap</h1><div class="icons"><div class="icon">◔</div><div class="icon user">👤</div></div></div>
+  <div class="tabs"><div class="tab on">Swap</div><div class="tab">Limit<span class="beta">Beta</span></div></div>
+
+  <div class="card sell">
+    <div class="lab"><span>Sell</span><span class="warn" id="sell-warn" hidden>Insufficient balance</span></div>
+    <div class="amt"><input id="sell" type="number" min="0" step="any" value="1" /><button class="tok" id="tok-sell"><span class="dot eth">Ξ</span>ETH ⌄</button></div>
+    <div class="sub"><span id="sell-usd">$—</span><span id="sell-bal">— ETH</span></div>
+    <button class="flip" id="flip" title="direction is fixed: ETH → APT">⇅</button>
+  </div>
+  <div class="card buy">
+    <div class="lab"><span>Buy</span><span></span></div>
+    <div class="amt"><input id="buy" type="text" readonly placeholder="0.0" /><button class="tok" id="tok-buy"><span class="dot apt">Ⓐ</span>APT ⌄</button></div>
+    <div class="sub"><span id="buy-usd"></span><span id="buy-bal"></span></div>
+  </div>
+
+  <button class="go" id="go">Enter an amount</button>
+
+  <div class="meta">
+    <div class="r"><span>Exchange rate</span><b class="hl" id="m-rate">—</b></div>
+    <div class="r"><span>Max slippage ⓘ</span><span class="slip">0.50% ▦</span></div>
+    <div class="r"><span>Receive at least ⓘ</span><b class="hl" id="m-min">—</b></div>
+    <div class="r"><span>Auction winner</span><b class="hl" id="m-winner">—</b></div>
+    <div class="r"><span>Light-client root</span><b class="hl" id="m-root" style="font-size:11px">—</b></div>
+  </div>
+
+  <details class="steps" open>
+    <summary>Settlement steps</summary>
+    <div id="steps"></div>
+    <div class="row2"><input id="in-fill" placeholder="Aptos fill recipient 0x… (64 hex)" /><button id="b-fill">Set</button></div>
+    <div class="row2"><input id="in-min" placeholder="minOut octas (default 1)" /><button id="b-quote2">Quote again</button></div>
+    <textarea class="proof" id="in-proof" placeholder='Proof JSON: {"bcs":"0x…","bitmask":"0x…","sig":"0x…","leafHash":"0x…","leafIndex":"0","siblings":["0x…"…]} — or paste full QC + inclusion'></textarea>
+    <div class="row2"><button id="b-prove">Submit proof</button><button id="b-claim">Claim + settle</button><button id="b-status">Status</button></div>
+    <table id="qtable"></table>
+  </details>
+  <div class="note">Demo only: server holds testnet keys and submits on your behalf. Proven claims settle with <b>no challenge wait</b> once the light-client proof verifies. <a href="/">v1 vault UI</a></div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const short = (h) => typeof h === "string" && h.length > 16 ? h.slice(0,10)+"..."+h.slice(-6) : h;
+async function api(path, body) {
+  const r = await fetch(path, { method: body ? "POST" : "GET",
+    headers: {"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error?.title ? `${j.error.title} — ${j.error.hint}` : (j.error || r.statusText));
+  return j;
+}
+let CFG = null, swapId = null, bestQuote = 0, userBal = Infinity;
+const stepsEl = $("steps");
+function step(id, label) {
+  let el = document.getElementById("st-"+id);
+  if (!el) { el = document.createElement("div"); el.className = "step"; el.id = "st-"+id;
+    el.innerHTML = `<span class="dot2"></span><div><div>${label}</div><div class="h"></div></div>`; stepsEl.appendChild(el); }
+  return el;
+}
+function mark(id, label, cls, hash) {
+  const el = step(id, label); el.className = "step" + (cls ? " "+cls : "");
+  if (hash) el.querySelector(".h").textContent = short(hash);
+}
+function resetSteps() { stepsEl.innerHTML = ""; }
+
+// --- header: balances + rate ---
+async function refresh() {
+  try {
+    CFG = await api("/api/swap/config");
+    if (!CFG.ready) { $("go").textContent = "Swap contracts not configured"; }
+  } catch(e){ $("go").textContent = "Server unreachable"; }
+  // Balances are best-effort (v1 vault endpoint may not exist on this chain);
+  // the swap math must work regardless.
+  try {
+    const b = await api("/api/balances");
+    userBal = Number(BigInt(b.marooUser)) / 1e18;
+    $("sell-bal").textContent = userBal.toFixed(4) + " ETH";
+  } catch(e){ $("sell-bal").textContent = "balance n/a"; userBal = Infinity; }
+  recompute();
+}
+function recompute() {
+  const amt = parseFloat($("sell").value);
+  const go = $("go");
+  if (!(amt > 0)) { go.textContent = "Enter an amount"; go.classList.remove("live");
+    $("buy").value = ""; $("m-rate").textContent = "—"; $("m-min").textContent = "—"; return; }
+  // Demo pricing: 1 ETH = 109.4938 APT units shown (illustrative), minus 0.5% slippage floor.
+  const out = amt * 109.4938;
+  $("buy").value = out.toFixed(4);
+  $("m-rate").textContent = `1 APT = ${(1/109.4938).toFixed(6)} ETH`;
+  $("m-min").textContent = (out * 0.995).toFixed(6) + " APT";
+  $("sell-usd").textContent = "$" + (amt * 109.95).toFixed(2);
+  const poor = userBal !== Infinity && amt > userBal;
+  $("sell-warn").hidden = !poor;
+  document.querySelector(".card.sell").classList.toggle("err", poor);
+  go.textContent = poor ? "Insufficient balance" : (CFG && !CFG.ready ? "Swap contracts not configured" : (swapId === null ? "Lock + start auction" : "Auction running — quote below"));
+  go.classList.toggle("live", !poor && CFG && CFG.ready);
+}
+$("sell").oninput = recompute;
+$("flip").onclick = () => alert("This demo bridges one way: ETH (Maroo) → APT (Aptos).");
+
+// --- main action: lock, then notify (auction opens) ---
+$("go").onclick = async () => {
+  const amt = parseFloat($("sell").value);
+  if (!(amt > 0) || amt > userBal) return;
+  const go = $("go"); go.disabled = true;
+  try {
+    resetSteps();
+    const rcpt = $("in-fill").value.trim() || "0x" + "aa".repeat(32);
+    mark("lock", "Locking ETH in escrow…");
+    const wei = BigInt(Math.round(amt * 1e18)).toString();
+    const r = await api("/api/swap/lock", { amount: wei, recipient: rcpt, minOut: $("in-min").value.trim() || "1", idempotencyKey: `ui-${Date.now()}` });
+    swapId = r.swapId;
+    mark("lock", `Locked — swap #${swapId}`, "done", r.hash);
+    mark("quote", "Auction open — solvers quoting (use Quote again for a second solver)…");
+    $("go").textContent = "Auction running — quote below";
+  } catch(e){ mark("lock", "Lock failed: " + e.message, "err"); }
+  go.disabled = false;
+};
+$("b-fill").onclick = () => { if (!/^0x[0-9a-fA-F]{64}$/.test($("in-fill").value.trim())) alert("Fill recipient must be 0x + 64 hex (Aptos address)."); else mark("fill", "Fill recipient set: " + short($("in-fill").value.trim()), "done"); };
+$("b-quote2").onclick = async () => {
+  if (swapId === null) return alert("Lock first.");
+  const out = $("buy").value;
+  if (!out) return;
+  try {
+    // octas-ish quote: scale displayed APT by 1e6 for the demo quote amount
+    const aptOut = BigInt(Math.round(parseFloat(out) * 1e6)).toString();
+    mark("quote", "Submitting quote…");
+    const r = await api("/api/swap/quote", { swapId, aptOut, minOut: $("in-min").value.trim() || "1" });
+    mark("quote", "Quote submitted", "done", r.hash);
+    bestQuote = Math.max(bestQuote, parseFloat(out));
+    $("m-winner").textContent = "quoting… (finalize after window)";
+    row("quote", `quote ${out} APT`, "");
+  } catch(e){ mark("quote", "Quote failed: " + e.message, "err"); }
+};
+function row(solver, text, cls) {
+  const t = $("qtable"); const tr = document.createElement("tr");
+  tr.innerHTML = `<td>${solver}</td><td>${text}</td><td class="${cls}"></td>`; t.appendChild(tr);
+}
+$("b-status").onclick = async () => {
+  if (swapId === null) return alert("Lock first.");
+  try {
+    const s = await api(`/api/swap/status?swapId=${swapId}`);
+    $("m-winner").textContent = s.finalized ? s.winner : (s.lockTime !== "0" ? "auction open" : "—");
+    if (s.winner && s.winner !== "0x0000000000000000000000000000000000000000") $("m-winner").textContent = short(s.winner);
+    $("m-root").textContent = short(s.latestRoot);
+    mark("status", `swap ${swapId}: finalized=${s.finalized} claimed=${s.escrow.claimed} qc@v${s.latestVersion}`, s.escrow.claimed ? "done" : "");
+  } catch(e){ mark("status", "Status failed: " + e.message, "err"); }
+};
+$("b-prove").onclick = async () => {
+  let p;
+  try { p = JSON.parse($("in-proof").value); }
+  catch { return alert("Proof must be JSON with bcs, bitmask, sig (+ leafHash, leafIndex, siblings for claim)."); }
+  try {
+    mark("qc", "Submitting QC to light client…");
+    const r = await api("/api/swap/submit-qc", { bcs: p.bcs, bitmask: p.bitmask, sig: p.sig });
+    mark("qc", `QC confirmed @v${r.latestVersion}`, "done", r.hash);
+    $("m-root").textContent = short(r.latestRoot);
+    window._proof = p;
+  } catch(e){ mark("qc", "QC failed: " + e.message, "err"); }
+};
+$("b-claim").onclick = async () => {
+  const p = window._proof;
+  if (!p || !p.leafHash) return alert("Submit proof first (needs leafHash/leafIndex/siblings).");
+  if (swapId === null) return alert("Lock first.");
+  try {
+    const s = await api(`/api/swap/status?swapId=${swapId}`);
+    const winner = (s.winner && s.winner !== "0x0000000000000000000000000000000000000000") ? s.winner : "0x0000000000000000000000000000000000000001";
+    mark("claim", "Claiming (proven, no challenge wait)…");
+    const r = await api("/api/swap/claim", { swapId, leafHash: p.leafHash, leafIndex: p.leafIndex ?? "0", siblings: p.siblings ?? [], payoutSolver: winner });
+    mark("claim", "Claimed + settled", "done", r.settleHash);
+    $("go").textContent = "Settled ✓";
+  } catch(e){ mark("claim", "Claim failed: " + e.message, "err"); }
+};
+
+// finalize helper: small link under quotes (window is 10 min on-chain; demo fast-forwards via second finalize click)
+document.querySelector("details.steps summary").insertAdjacentHTML("afterend",
+  `<div class="row2"><button id="b-fin">Finalize auction</button></div>`);
+document.addEventListener("click", async (e) => {
+  if (e.target && e.target.id === "b-fin") {
+    if (swapId === null) return alert("Lock first.");
+    try {
+      const r = await api("/api/swap/finalize", { swapId });
+      mark("quote", "Winner: " + short(r.winner), "done", r.hash);
+      $("m-winner").textContent = short(r.winner);
+    } catch(err){ mark("quote", "Finalize failed (window may still be open): " + err.message, "err"); }
+  }
+});
+refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 20000);
+</script>
+</body>
+</html>

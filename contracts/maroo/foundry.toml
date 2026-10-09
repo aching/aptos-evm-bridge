@@ -5,5 +5,8 @@ libs = ["lib"]
 solc = "../../.tools/solc-0.8.28"
 auto_detect_solc = false
 offline = true
+# via-IR: required since FillAttester/SwapEscrow.claimAttested exceed legacy
+# codegen's stack depth (compiler-recommended fix; slightly slower builds).
+via_ir = true
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

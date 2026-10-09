@@ -62,7 +62,8 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>OKRW Bridge <span class="pill">testnet demo</span> <span class="pill" id="health">health: …</span></h1>
+  <h1>OKRW Bridge <span class="pill">testnet demo</span> <span class="pill" id="health" style="cursor:pointer" title="click for details">health: ...</span></h1>
+  <div id="health-detail" class="raw" style="display:none"></div>
   <p class="sub">Maroo testnet (native tOKRW vault) ↔ Aptos testnet (managed OKRW coin) · lock/mint + trusted relayer</p>
 
   <div class="grid">
@@ -150,14 +151,26 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-const fmt = (wei) => (Number(BigInt(wei)) / 1e18).toFixed(4);
+const fmt = (wei) => (Number(BigInt(wei)) / 1e18).toFixed(4); // Maroo 18-decimal legs
+const fmtApt = (octas) => (Number(BigInt(octas)) / 1e8).toFixed(4); // Aptos OKRW: 8-decimal (octas)
 const short = (h) => h ? h.slice(0,10) + "…" + h.slice(-6) : "";
 let LINKS = { aptos:"", maroo:"" }, lastDepositBlock = null, CFG = null, watchedNonce = null;
 let tickerTimers = {};
 
-async function api(path, body) {
-  const r = await fetch(path, { method: body ? "POST" : "GET",
-    headers: {"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined });
+async function api(path, body, timeoutMs = 30000) {
+  // Hard timeout: a hung endpoint (Maroo log scan) must fail fast into the
+  // allSettled fallbacks below instead of freezing the whole panel forever
+  // (2026-10-09: /api/pending hung 120s+, blanking balances + health pill).
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  let r;
+  try {
+    r = await fetch(path, { method: body ? "POST" : "GET", signal: ctl.signal,
+      headers: {"Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined });
+  } catch (e) {
+    if (e && e.name === "AbortError") throw new Error(`request timed out after ${timeoutMs / 1000}s: ${path}`);
+    throw e;
+  } finally { clearTimeout(t); }
   const j = await r.json();
   if (!r.ok) {
     // Structured server errors: { code, title, hint, retryable, raw }.
@@ -243,10 +256,21 @@ async function refresh() {
     // In wallet/custom-recipient mode, track that address's OKRW balance.
     const rcpt = customRcpt();
     const balUrl = rcpt ? `/api/balances?aptosUser=${encodeURIComponent(rcpt)}` : "/api/balances";
-    const [b, hist, queue] = await Promise.all([
+    // The whole row must render even if one source fails: balance/history/
+    // queue endpoints can each time out independently (Maroo RPC log scans,
+    // Aptos views). Promise.all would blank the ENTIRE panel on any single
+    // failure — hence allSettled with per-source fallbacks.
+    const [bR, histR, queueR] = await Promise.allSettled([
       api(balUrl), api("/api/history"),
       api("/api/pending").catch(() => null),
     ]);
+    const b = bR.status === "fulfilled" ? bR.value : null;
+    const hist = histR.status === "fulfilled" ? histR.value : [];
+    const queue = queueR.status === "fulfilled" ? queueR.value : null;
+    if (!b) {
+      status("balances unavailable — retrying", "err");
+      return;
+    }
     // Health uses a raw fetch: /api/health returns 503 when issues exist,
     // and api() throws on non-2xx — which would freeze the pill exactly when
     // there's something to show. Parse the body regardless of status.
@@ -257,14 +281,23 @@ async function refresh() {
     } catch { /* pill keeps last state */ }
     $("b-maroo-user").textContent = fmt(b.marooUser);
     $("b-vault").textContent = fmt(b.vaultEscrow);
-    $("b-aptos-user").textContent = fmt(b.aptosUser) + (rcpt && b.aptosUserWatched === rcpt ? " (watched)" : "");
-    $("b-aptos-relayer").textContent = fmt(b.aptosRelayer);
+    $("b-aptos-user").textContent = fmtApt(b.aptosUser) + (rcpt && b.aptosUserWatched === rcpt ? " (watched)" : "");
+    $("b-aptos-relayer").textContent = fmtApt(b.aptosRelayer);
     const hp = $("health");
     if (health) {
       hp.textContent = health.ok ? "health: ok" : `health: ${health.issues.length} issue(s)`;
       hp.className = "pill " + (health.ok ? "ok" : "bad");
       hp.title = health.issues.map(i => `[${i.level}] ${i.check}: ${i.detail}`).join("\n") ||
         `escrow ${health.vaultEscrow} = supply ${health.aptosSupply}`;
+      // Click the pill to expand the full issue list inline (title tooltips
+      // are undiscoverable; the pill previously had no click target).
+      const hd = $("health-detail");
+      hp.onclick = () => {
+        if (!health || health.ok) { hd.style.display = "none"; return; }
+        hd.style.display = hd.style.display === "none" ? "block" : "none";
+        hd.textContent = health.issues.map(i => `[${i.level}] ${i.check}\n  ${i.detail}`).join("\n\n") +
+          `\n\nvaultEscrow=${health.vaultEscrow} aptosSupply=${health.aptosSupply} checkedAt=${health.checkedAt}`;
+      };
     }
     const tb = $("hist");
     tb.innerHTML = hist.length ? hist.map(h =>
@@ -292,7 +325,15 @@ async function refresh() {
   } catch(e){ statusError(e); }
 }
 function done(id){ $(id).classList.add("done"); $(id).querySelector(".n").textContent = "✓"; }
-const wei = () => BigInt(Math.round(parseFloat($("amt").value) * 1e18)).toString();
+const wei = () => {
+  // Float-safe decimal→wei: parseFloat("2.3")*1e18 rounds to ...744 on the
+  // low bits (2026-10-09: "2.3" -> 2299999999999999744), tripping the
+  // whole-octa guard. Expand the decimal string into integer wei exactly.
+  const s = $("amt").value.trim();
+  if (!/^\d+(\.\d{1,18})?$/.test(s)) return "0";
+  const [i, f = ""] = s.split(".");
+  return (BigInt(i) * 10n ** 18n + BigInt((f + "0".repeat(18)).slice(0, 18))).toString();
+};
 
 $("b-deposit").onclick = async () => {
   const btn = $("b-deposit"); btn.disabled = true;

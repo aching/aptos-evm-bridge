@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Move Bridge Swaps — ETH → APT (testnet)</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --txt:#e6edf3; --dim:#8b949e;
+          --acc:#1f6feb; --green:#3fb950; --amber:#d29922; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+  .wrap { max-width:720px; margin:0 auto; padding:28px 20px 60px; }
+  h1 { font-size:24px; margin:0 0 4px; }
+  .sub { color:var(--dim); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin-top:14px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 10px; }
+  .row { display:flex; gap:10px; align-items:center; margin:12px 0; flex-wrap:wrap; }
+  input[type=text], input[type=number] { background:#0d1117; border:1px solid var(--line); color:var(--txt);
+      border-radius:8px; padding:9px 12px; font-size:14px; width:200px; }
+  input.wide { width:100%; font-family:ui-monospace,monospace; font-size:12px; }
+  button { background:var(--acc); color:#fff; border:none; border-radius:8px;
+           padding:10px 18px; font-size:14px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:wait; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--txt); }
+  #status { min-height:22px; font-size:13.5px; color:var(--amber); margin:8px 0; }
+  #status.ok { color:var(--green); } #status.err { color:#f85149; }
+  #quote-box { font-size:15px; margin:8px 0; }
+  #quote-box b { font-size:20px; }
+  .pill { display:inline-block; font-size:11px; padding:2px 8px; border-radius:20px;
+          background:#21262d; border:1px solid var(--line); color:var(--dim); }
+  .pill.ok { color:var(--green); border-color:var(--green); }
+  .pill.bad { color:#f85149; border-color:#f85149; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; color:var(--dim); font-weight:600; padding:8px 10px; border-bottom:1px solid var(--line); }
+  td { padding:8px 10px; border-bottom:1px solid #21262d; vertical-align:top; font-family:ui-monospace,monospace; font-size:11.5px; }
+  a { color:#58a6ff; text-decoration:none; }
+  code.cmd { display:block; background:#0d1117; border:1px solid var(--line); border-radius:8px;
+             padding:10px 12px; font-size:11.5px; margin:8px 0; white-space:pre-wrap; word-break:break-all; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Move Bridge Swaps <span class="pill">testnet demo</span> <span class="pill" id="health">solver: ...</span></h1>
+  <p class="sub">ETH on Ethereum testnet → APT on Aptos testnet · solver RFQ, fill-or-refund escrow</p>
+
+  <div class="card">
+    <h2>1 · Get a quote</h2>
+    <div class="row">
+      <label>Pay <input id="amt" type="number" value="0.01" min="0" step="0.001" /> ETH</label>
+      <label>Aptos recipient <input id="rcpt" type="text" placeholder="0x..." style="width:340px" /></label>
+    </div>
+    <div class="row">
+      <button id="b-quote">Quote</button>
+    </div>
+    <div id="quote-box"></div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card">
+    <h2>2 · Lock ETH in escrow</h2>
+    <p style="color:var(--dim);font-size:13px">Server demo key locks on your behalf in one-click mode, or copy the command to sign with your own wallet:</p>
+    <div class="row">
+      <button id="b-lock">Lock (one-click)</button>
+      <button id="b-cmd" class="ghost">Show cast command</button>
+    </div>
+    <div id="lock-cmd"></div>
+  </div>
+
+  <div class="card">
+    <h2>3 · Track &amp; refund</h2>
+    <div class="row">
+      <label>Swap ID <input id="swap-id" type="number" min="0" value="0" style="width:100px" /></label>
+      <button id="b-track" class="ghost">Track</button>
+      <button id="b-refund" class="ghost">Refund (after deadline)</button>
+    </div>
+    <div id="track-box"></div>
+  </div>
+
+  <div class="card">
+    <h2>Safety</h2>
+    <p style="font-size:13px;color:var(--dim)">Escrow releases only to the solver with fill proof, or back to you after the deadline. No admin withdraw exists. Solver fills APT first — its inventory is at risk, not yours. Challenge window lets anyone cancel a bogus claim before it settles.</p>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const status = (msg, cls="") => { const s=$("status"); s.textContent=msg; s.className=cls; };
+let lastQuote = null;
+
+async function api(path, opts={}) {
+  const r = await fetch(path, { headers: {"content-type":"application/json"}, ...opts });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+$("b-quote").onclick = async () => {
+  try {
+    status("quoting...");
+    const q = await api("/api/swap/quote", { method:"POST",
+      body: JSON.stringify({ ethAmount: $("amt").value, aptosRecipient: $("rcpt").value || undefined }) });
+    lastQuote = q;
+    $("quote-box").innerHTML = `You pay <b>${q.ethAmount} ETH</b> → you receive <b>${q.aptOut} APT</b> ` +
+      `<span class="pill">expires in ${q.quoteTtlS}s</span><br/>` +
+      `<span style="color:var(--dim);font-size:12.5px">minOut ${q.minOutOctas} octas · deadline ${q.deadlineDays} day · escrow ${q.escrow}</span>`;
+    status("quote locked for solver fill — lock within TTL", "ok");
+  } catch(e) { status("quote failed: "+e.message, "err"); }
+};
+
+$("b-lock").onclick = async () => {
+  if (!lastQuote) { status("get a quote first", "err"); return; }
+  try {
+    status("locking...");
+    const r = await api("/api/swap/lock", { method:"POST",
+      body: JSON.stringify({ ethAmount: lastQuote.ethAmount, aptosRecipient: $("rcpt").value, minOutOctas: lastQuote.minOutOctas }) });
+    $("swap-id").value = r.swapId;
+    status(`locked: swap #${r.swapId} (tx ${r.txHash}) — solver filling...`, "ok");
+  } catch(e) { status("lock failed: "+e.message, "err"); }
+};
+
+$("b-cmd").onclick = async () => {
+  if (!lastQuote) { status("get a quote first", "err"); return; }
+  const rcpt = $("rcpt").value || "<APTOS_RECIPIENT_32B>";
+  $("lock-cmd").innerHTML = `<code class="cmd">cast send $SWAP_ESCROW "lock(bytes,uint256,uint64)" ${rcpt} ${lastQuote.minOutOctas} 86400 --value ${lastQuote.ethAmount}ether --rpc-url $ETH_RPC_URL --private-key $KEY</code>`;
+};
+
+$("b-track").onclick = async () => {
+  try {
+    const t = await api(`/api/swap/status/${$("swap-id").value}`);
+    const pill = t.settled ? '<span class="pill ok">settled</span>' : t.refunded ? '<span class="pill bad">refunded</span>'
+      : t.claimed ? '<span class="pill">claimed (challenge window)</span>' : '<span class="pill">locked — awaiting fill</span>';
+    $("track-box").innerHTML = `${pill}<br/>amount ${t.amountEth} ETH · minOut ${t.minOutOctas} octas<br/>` +
+      (t.aptosTx ? `aptos fill: ${t.aptosTx}<br/>` : "") +
+      (t.refundable ? `<span style="color:var(--amber)">deadline passed — refund available</span>` : `deadline ${t.deadline}`);
+  } catch(e) { status("track failed: "+e.message, "err"); }
+};
+
+$("b-refund").onclick = async () => {
+  try {
+    status("refunding...");
+    const r = await api("/api/swap/refund", { method:"POST", body: JSON.stringify({ swapId: Number($("swap-id").value) }) });
+    status(`refunded (tx ${r.txHash})`, "ok");
+  } catch(e) { status("refund failed: "+e.message, "err"); }
+};
+
+api("/api/swap/health").then(h => { $("health").textContent = `solver: ${h.solver} · spread ${h.spreadBps}bps`; })
+  .catch(() => { $("health").textContent = "solver: offline"; });
+</script>
+</body>
+</html>

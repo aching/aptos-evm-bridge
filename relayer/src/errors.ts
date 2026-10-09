@@ -102,7 +102,7 @@ function vaultRevert(msg: string): Spec | null {
 }
 
 /** Convert any thrown error into a user-facing FriendlyError + short code. */
-export function friendlyError(e: unknown, context: "deposit" | "relay" | "bridge-back" | "balances" | "health"): FriendlyError & { raw: string } {
+export function friendlyError(e: unknown, context: "deposit" | "relay" | "bridge-back" | "balances" | "health" | "swap status" | "swap lock" | "swap quote" | "swap finalize" | "submit QC" | "proven claim"): FriendlyError & { raw: string } {
   const msg = (e as Error)?.message ?? String(e);
   const raw = msg.slice(0, 300);
 
