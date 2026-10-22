@@ -82,6 +82,7 @@ contract SwapAuction {
     error NotWinner(address caller);
     error QuoteBelowMinOut();
     error BadWindow();
+    error AllQuotesExpired();
 
     modifier onlyAdmin() {
         if (msg.sender != admin) revert NotAdmin(msg.sender);
@@ -158,6 +159,8 @@ contract SwapAuction {
     }
 
     /// @notice Finalize after the window: highest aptOut wins. Anyone may call.
+    ///         Quotes expired at finalize time are skipped (stale prices must
+    ///         not win exclusivity); if none remain live, reverts AllQuotesExpired.
     /// @return winningSolver The exclusive filler for this swap.
     function finalize(uint64 swapId) external returns (address winningSolver) {
         if (finalized[swapId]) revert AlreadyFinalized();
@@ -167,11 +170,13 @@ contract SwapAuction {
         if (qs.length == 0) revert NoQuotes();
         uint256 best = 0;
         for (uint256 i = 0; i < qs.length; i++) {
+            if (qs[i].expiry <= block.timestamp) continue; // stale price: cannot win
             if (qs[i].aptOut > best) {
                 best = qs[i].aptOut;
                 winningSolver = qs[i].solver;
             }
         }
+        if (winningSolver == address(0)) revert AllQuotesExpired();
         finalized[swapId] = true;
         winner[swapId] = winningSolver;
         emit AuctionFinalized(swapId, winningSolver, best);

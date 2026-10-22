@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   fillLeafHash, foldInclusion, claimProvenArgs, parseLedgerInfo, sha3, ACC_TAG,
-} from '../src/prover.ts';
+} from '../src/prover.js';
 
 const LEAF = '4bbc8b1ce34ad12463d6098cb21458a74c9ccafe70713faf70e8cc50103dde74';
 const SIBS = [

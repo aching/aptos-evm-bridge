@@ -122,6 +122,34 @@ contract SwapAuctionTest is Test {
         auction.submitQuote(0, 100, uint64(block.timestamp + 1 days), 50);
     }
 
+    // ------------------------------------------------------------------ expiry
+
+    function test_finalize_skipsExpiredQuotes() public {
+        regBoth();
+        auction.notifyLock(0);
+        // A bids high but expires before the window closes; B bids lower, live.
+        vm.prank(solverA);
+        auction.submitQuote(0, 200, uint64(block.timestamp + 5 minutes), 50);
+        vm.prank(solverB);
+        auction.submitQuote(0, 150, uint64(block.timestamp + 1 days), 50);
+        vm.warp(block.timestamp + 10 minutes + 1);
+        address w = auction.finalize(0);
+        assertEq(w, solverB); // stale high bid cannot win
+        assertEq(auction.winner(0), solverB);
+    }
+
+    function test_finalize_revertsAllQuotesExpired() public {
+        regBoth();
+        auction.notifyLock(0);
+        vm.prank(solverA);
+        auction.submitQuote(0, 200, uint64(block.timestamp + 5 minutes), 50);
+        vm.prank(solverB);
+        auction.submitQuote(0, 150, uint64(block.timestamp + 1 minutes), 50);
+        vm.warp(block.timestamp + 10 minutes + 1);
+        vm.expectRevert(SwapAuction.AllQuotesExpired.selector);
+        auction.finalize(0);
+    }
+
     // ----------------------------------------------------------------- default
 
     function test_reportDefault_slashesToUser() public {

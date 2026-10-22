@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Move Bridge Swaps — ETH → APT (testnet)</title>
+<title>Move Bridge Swaps — ETH ⇄ APT (testnet)</title>
 <link rel="icon" href="data:,">
 <style>
   :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --txt:#e6edf3; --dim:#8b949e;
@@ -43,13 +43,22 @@
 <body>
 <div class="wrap">
   <h1>Move Bridge Swaps <span class="pill">testnet demo</span> <span class="pill" id="health">solver: ...</span></h1>
-  <p class="sub">ETH on Ethereum testnet → APT on Aptos testnet · solver RFQ, fill-or-refund escrow</p>
+  <p class="sub">ETH on Ethereum testnet ⇄ APT on Aptos testnet · solver RFQ, fill-or-refund escrow</p>
+
+  <div class="card">
+    <h2>Direction</h2>
+    <div class="row">
+      <button id="b-dir-fwd" class="ghost">ETH → APT</button>
+      <button id="b-dir-rev" class="ghost">APT → ETH</button>
+      <span id="dir-label" style="color:var(--dim);font-size:13px"></span>
+    </div>
+  </div>
 
   <div class="card">
     <h2>1 · Get a quote</h2>
     <div class="row">
-      <label>Pay <input id="amt" type="number" value="0.01" min="0" step="0.001" /> ETH</label>
-      <label>Aptos recipient <input id="rcpt" type="text" placeholder="0x..." style="width:340px" /></label>
+      <label id="lbl-pay">Pay <input id="amt" type="number" value="0.01" min="0" step="0.001" /> <span id="unit-pay">ETH</span></label>
+      <label><span id="lbl-rcpt">Aptos recipient</span> <input id="rcpt" type="text" placeholder="0x..." style="width:340px" /></label>
     </div>
     <div class="row">
       <button id="b-quote">Quote</button>
@@ -59,8 +68,8 @@
   </div>
 
   <div class="card">
-    <h2>2 · Lock ETH in escrow</h2>
-    <p style="color:var(--dim);font-size:13px">Server demo key locks on your behalf in one-click mode, or copy the command to sign with your own wallet:</p>
+    <h2 id="h-lock">2 · Lock ETH in escrow</h2>
+    <p style="color:var(--dim);font-size:13px" id="p-lock">Server demo key locks on your behalf in one-click mode, or copy the command to sign with your own wallet:</p>
     <div class="row">
       <button id="b-lock">Lock (one-click)</button>
       <button id="b-cmd" class="ghost">Show cast command</button>
@@ -76,6 +85,16 @@
       <button id="b-refund" class="ghost">Refund (after deadline)</button>
     </div>
     <div id="track-box"></div>
+  </div>
+
+  <div class="card">
+    <h2>4 · Activity</h2>
+    <div class="row">
+      <label><input id="act-mine" type="checkbox" checked style="width:auto" /> only swap <input id="act-id" type="text" style="width:80px" placeholder="id / r-id" /></label>
+      <button id="b-act" class="ghost">Refresh</button>
+      <span style="color:var(--dim);font-size:12px">auto-refreshes every 5s while a swap is tracked</span>
+    </div>
+    <div id="act-box"><span style="color:var(--dim)">no events yet — quote or lock to start the trail.</span></div>
   </div>
 
   <div class="card">
@@ -95,15 +114,60 @@ async function api(path, opts={}) {
   return j;
 }
 
+// --- direction: forward (ETH->APT, numeric swap ids) vs reverse (APT->ETH, r<id>).
+let DIR = "fwd";
+const DIRS = {
+  fwd: { label: "ETH → APT: lock ETH on Anvil, solver fills APT on testnet",
+         unitPay: "ETH", rcptLabel: "Aptos recipient", rcptPh: "0x...",
+         lockH: "2 · Lock ETH in escrow",
+         lockP: "Server demo key locks on your behalf in one-click mode, or copy the command to sign with your own wallet:" },
+  rev: { label: "APT → ETH: lock APT on Aptos testnet, solver fills ETH on Anvil",
+         unitPay: "APT (octas)", rcptLabel: "EVM recipient", rcptPh: "0x... (20 bytes)",
+         lockH: "2 · Lock APT in escrow",
+         lockP: "Server demo key locks APT on Aptos testnet on your behalf. Single-solver direct fill (no auction on this direction)." },
+};
+function setDir(d) {
+  DIR = d; lastQuote = null;
+  $("quote-box").innerHTML = ""; $("lock-cmd").innerHTML = ""; $("track-box").innerHTML = "";
+  $("unit-pay").textContent = DIRS[d].unitPay;
+  $("lbl-rcpt").textContent = DIRS[d].rcptLabel;
+  $("rcpt").placeholder = DIRS[d].rcptPh;
+  $("h-lock").textContent = DIRS[d].lockH;
+  $("p-lock").textContent = DIRS[d].lockP;
+  $("dir-label").textContent = DIRS[d].label;
+  $("b-dir-fwd").className = d === "fwd" ? "" : "ghost";
+  $("b-dir-rev").className = d === "rev" ? "" : "ghost";
+  $("amt").value = d === "fwd" ? "0.01" : "6000000";
+  status("");
+}
+$("b-dir-fwd").onclick = () => setDir("fwd");
+$("b-dir-rev").onclick = () => setDir("rev");
+
+// Track-box swap id may be "12" (forward) or "r12" (reverse).
+function trackId() {
+  const v = $("swap-id").value.trim();
+  if (DIR === "rev") return v.startsWith("r") ? v : `r${v}`;
+  return v.replace(/^r/, "");
+}
+
 $("b-quote").onclick = async () => {
   try {
     status("quoting...");
-    const q = await api("/api/swap/quote", { method:"POST",
-      body: JSON.stringify({ ethAmount: $("amt").value, aptosRecipient: $("rcpt").value || undefined }) });
-    lastQuote = q;
-    $("quote-box").innerHTML = `You pay <b>${q.ethAmount} ETH</b> → you receive <b>${q.aptOut} APT</b> ` +
-      `<span class="pill">expires in ${q.quoteTtlS}s</span><br/>` +
-      `<span style="color:var(--dim);font-size:12.5px">minOut ${q.minOutOctas} octas · deadline ${q.deadlineDays} day · escrow ${q.escrow}</span>`;
+    if (DIR === "fwd") {
+      const q = await api("/api/swap/quote", { method:"POST",
+        body: JSON.stringify({ ethAmount: $("amt").value, aptosRecipient: $("rcpt").value || undefined }) });
+      lastQuote = { ...q, dir: "fwd" };
+      $("quote-box").innerHTML = `You pay <b>${q.ethAmount} ETH</b> → you receive <b>${q.aptOut} APT</b> ` +
+        `<span class="pill">expires in ${q.quoteTtlS}s</span><br/>` +
+        `<span style="color:var(--dim);font-size:12.5px">minOut ${q.minOutOctas} octas · deadline ${q.deadlineDays} day · escrow ${q.escrow}</span>`;
+    } else {
+      const q = await api("/api/swap/rquote", { method:"POST",
+        body: JSON.stringify({ aptOctas: $("amt").value }) });
+      lastQuote = { ...q, dir: "rev" };
+      $("quote-box").innerHTML = `You pay <b>${q.aptOctas} octas APT</b> → you receive <b>${q.ethOut} ETH</b> ` +
+        `<span class="pill">expires in ${q.quoteTtlS}s</span><br/>` +
+        `<span style="color:var(--dim);font-size:12.5px">minOut ${q.minOutWei} wei · deadline ${q.deadlineDays} day · escrow ${q.escrowAdmin ?? "unconfigured"}</span>`;
+    }
     status("quote locked for solver fill — lock within TTL", "ok");
   } catch(e) { status("quote failed: "+e.message, "err"); }
 };
@@ -112,26 +176,44 @@ $("b-lock").onclick = async () => {
   if (!lastQuote) { status("get a quote first", "err"); return; }
   try {
     status("locking...");
-    const r = await api("/api/swap/lock", { method:"POST",
-      body: JSON.stringify({ ethAmount: lastQuote.ethAmount, aptosRecipient: $("rcpt").value, minOutOctas: lastQuote.minOutOctas }) });
-    $("swap-id").value = r.swapId;
-    status(`locked: swap #${r.swapId} (tx ${r.txHash}) — solver filling...`, "ok");
+    if (lastQuote.dir === "fwd") {
+      const r = await api("/api/swap/lock", { method:"POST",
+        body: JSON.stringify({ ethAmount: lastQuote.ethAmount, aptosRecipient: $("rcpt").value, minOutOctas: lastQuote.minOutOctas }) });
+      $("swap-id").value = r.swapId;
+      status(`locked: swap #${r.swapId} (tx ${r.txHash}) — solver filling...`, "ok");
+    } else {
+      const r = await api("/api/swap/rlock", { method:"POST",
+        body: JSON.stringify({ aptOctas: lastQuote.aptOctas, evmRecipient: $("rcpt").value, minOutWei: lastQuote.minOutWei }) });
+      $("swap-id").value = `r${r.swapId}`;
+      $("act-id").value = `r${r.swapId}`;
+      status(`locked: reverse swap #${r.swapId} (tx ${r.txHash}) — solver filling...`, "ok");
+    }
+    refreshActivity();
   } catch(e) { status("lock failed: "+e.message, "err"); }
 };
 
 $("b-cmd").onclick = async () => {
   if (!lastQuote) { status("get a quote first", "err"); return; }
+  if (lastQuote.dir === "rev") {
+    const rcpt = $("rcpt").value || "<EVM_RECIPIENT_20B>";
+    $("lock-cmd").innerHTML = `<code class="cmd">aptos move run --function-id $ADMIN::swap_escrow::lock --args address:$ADMIN address:${rcpt} u64:${lastQuote.aptOctas} u64:${lastQuote.minOutWei} u64:$DEADLINE</code>`;
+    return;
+  }
   const rcpt = $("rcpt").value || "<APTOS_RECIPIENT_32B>";
   $("lock-cmd").innerHTML = `<code class="cmd">cast send $SWAP_ESCROW "lock(bytes,uint256,uint64)" ${rcpt} ${lastQuote.minOutOctas} 86400 --value ${lastQuote.ethAmount}ether --rpc-url $ETH_RPC_URL --private-key $KEY</code>`;
 };
 
 $("b-track").onclick = async () => {
   try {
-    const t = await api(`/api/swap/status/${$("swap-id").value}`);
+    const id = trackId();
+    const isRev = id.startsWith("r");
+    const t = await api(isRev ? `/api/swap/rstatus/${id.slice(1)}` : `/api/swap/status/${id}`);
     const pill = t.settled ? '<span class="pill ok">settled</span>' : t.refunded ? '<span class="pill bad">refunded</span>'
       : t.claimed ? '<span class="pill">claimed (challenge window)</span>' : '<span class="pill">locked — awaiting fill</span>';
-    $("track-box").innerHTML = `${pill}<br/>amount ${t.amountEth} ETH · minOut ${t.minOutOctas} octas<br/>` +
-      (t.aptosTx ? `aptos fill: ${t.aptosTx}<br/>` : "") +
+    const amtLine = isRev ? `amount ${t.amountOctas} octas · minOut ${t.minOutWei} wei<br/>evm recipient ${t.evmRecipient}`
+      : `amount ${t.amountEth} ETH · minOut ${t.minOutOctas} octas` +
+        (t.aptosTx ? `<br/>aptos fill: ${t.aptosTx}` : "");
+    $("track-box").innerHTML = `${pill}<br/>${amtLine}<br/>` +
       (t.refundable ? `<span style="color:var(--amber)">deadline passed — refund available</span>` : `deadline ${t.deadline}`);
   } catch(e) { status("track failed: "+e.message, "err"); }
 };
@@ -139,13 +221,51 @@ $("b-track").onclick = async () => {
 $("b-refund").onclick = async () => {
   try {
     status("refunding...");
-    const r = await api("/api/swap/refund", { method:"POST", body: JSON.stringify({ swapId: Number($("swap-id").value) }) });
+    const id = trackId();
+    const path = id.startsWith("r") ? "/api/swap/rrefund" : "/api/swap/refund";
+    const sid = id.startsWith("r") ? Number(id.slice(1)) : Number(id);
+    const r = await api(path, { method:"POST", body: JSON.stringify({ swapId: sid }) });
     status(`refunded (tx ${r.txHash})`, "ok");
   } catch(e) { status("refund failed: "+e.message, "err"); }
 };
 
 api("/api/swap/health").then(h => { $("health").textContent = `solver: ${h.solver} · spread ${h.spreadBps}bps`; })
   .catch(() => { $("health").textContent = "solver: offline"; });
+
+// --- activity feed: one trail for user + solver + server events.
+let actTimer = null;
+const STEP_PILL = { quoted:"", locked:"ok", "picked-up":"", filled:"ok", claimed:"", won:"ok",
+  lost:"bad", skipped:"bad", failed:"bad", refunded:"ok", restart:"",
+  "r-quoted":"", "r-locked":"ok", "r-picked-up":"", "r-filled":"ok", "r-claimed":"", "r-settled":"ok",
+  "r-refunded":"ok", "r-skipped":"bad", "r-failed":"bad" };
+function txLink(e) {
+  if (!e.tx) return "";
+  const url = e.txKind === "aptos" ? `https://explorer.aptoslabs.com/txn/${e.tx}?network=testnet`
+    : `https://explorer-testnet.maroo.io/tx/${e.tx}`;
+  return ` <a href="${url}" target="_blank" rel="noopener">${e.txKind === "aptos" ? "aptos" : "evm"} ${e.tx.slice(0,10)}…</a>`;
+}
+async function refreshActivity() {
+  try {
+    const onlyMine = $("act-mine").checked;
+    const id = $("act-id").value;
+    const q = onlyMine && id !== "" ? `?swapId=${encodeURIComponent(id)}` : "";
+    const list = await api(`/api/swap/activity${q}`);
+    if (!list.length) { $("act-box").innerHTML = `<span style="color:var(--dim)">no events yet.</span>`; return; }
+    $("act-box").innerHTML = `<table><tr><th>time</th><th>swap</th><th>who</th><th>step</th><th>detail</th></tr>` +
+      list.map(e => `<tr><td>${e.time.slice(11,19)}</td><td>${e.swapId ?? "—"}</td><td>${e.source}</td>` +
+        `<td><span class="pill ${STEP_PILL[e.step] ?? ""}">${e.step}</span></td><td>${e.detail}${txLink(e)}</td></tr>`).join("") +
+      `</table>`;
+  } catch(e) { /* feed is observability — never break the page */ }
+}
+$("b-act").onclick = refreshActivity;
+$("act-mine").onchange = refreshActivity;
+// Auto-refresh while the user tracks a swap; stops when the id field clears.
+setInterval(() => { if ($("act-mine").checked && $("act-id").value !== "") refreshActivity(); }, 5000);
+// Keep the activity filter in sync with Track, and log Track lookups too.
+const _track = $("b-track").onclick;
+$("b-track").onclick = async () => { await _track(); $("act-id").value = trackId(); refreshActivity(); };
+setDir("fwd");
+refreshActivity();
 </script>
 </body>
 </html>
