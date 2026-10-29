@@ -1,0 +1,25 @@
+# fly.swap.toml — Demo B (swap RFQ UI + solver daemon). Same image; runs `swap` + `solver`.
+app = 'aptos-evm-swap'
+primary_region = 'nrt'
+
+[build]
+
+[processes]
+  swap = "./scripts/fly-start.sh"
+  solver = "./scripts/fly-start.sh"
+
+[http_service]
+  internal_port = 3201
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['swap']
+
+# solver: no public ports (polls Maroo + Aptos, reports to the swap server).
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024

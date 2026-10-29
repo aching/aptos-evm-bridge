@@ -1,14 +1,14 @@
-# fly.toml app configuration file generated for aptos-evm-bridge on 2026-10-01T16:58:39+09:00
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
-
+# fly.toml — Demo A (OKRW bridge UI). Same image as the swap app; runs only `app`.
 app = 'aptos-evm-bridge'
 primary_region = 'nrt'
 
 [build]
+
+[processes]
+  app = "./scripts/fly-start.sh"
+
 [http_service]
-  internal_port = 3013
+  internal_port = 3024
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
