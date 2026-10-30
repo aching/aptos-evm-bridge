@@ -280,8 +280,16 @@ async function main() {
   let lastBlock: bigint;
   if (process.env.SWAP_START_BLOCK) lastBlock = BigInt(process.env.SWAP_START_BLOCK);
   else if (store.lastBlock !== null) lastBlock = BigInt(store.lastBlock);
-  else lastBlock = await client.getBlockNumber();
-  console.log(`watching from block ${lastBlock}`);
+  else {
+    // Cold start (fresh store — e.g. after a redeploy wipes ephemeral disk):
+    // scan back a bounded window instead of starting at head, or in-flight
+    // swaps lock in before the restart and strand forever behind the cursor
+    // (observed on Fly 2026-10-29: two redeploys stranded swaps 0 and 1).
+    // 500 blocks ≈ recent demo history; 8-block Maroo windows ≈ 63 RPCs.
+    const head0 = await client.getBlockNumber();
+    lastBlock = head0 > 500n ? head0 - 500n : 0n;
+    console.log(`cold start: scanning back 500 blocks from ${head0}`);
+  }
 
   for (;;) {
     try {
