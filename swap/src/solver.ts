@@ -34,6 +34,12 @@ const ATTESTER = loadOptionalEvmAddress("SWAP_ATTESTER_ADDRESS"); // null = solv
 // Reverse direction (APT -> ETH): Move escrow admin hosting swap_escrow.
 // Unset = reverse loop disabled (forward-only daemon).
 const R_ESCROW_ADMIN = ((process.env.SWAP_REVERSE_ESCROW_ADMIN ?? "").trim() || null) as Address | null;
+// Gas budget for solver-submitted Aptos txs (fill/claim/settle). ts-sdk's
+// default max-gas deposit exceeds small demo wallets, failing validation
+// with INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE even when amount+fee fits
+// (observed on Fly 2026-10-29: 380k-octas wallet vs 20M+ default deposit).
+// Override with APTOS_MAX_GAS (same knob as the swap server).
+const SOLVER_MAX_GAS = Number(process.env.APTOS_MAX_GAS ?? 100_000);
 
 // --- activity reports to the swap server UI (best-effort: never break a fill).
 const REPORT_URL = (process.env.SWAP_API_URL ?? "http://127.0.0.1:3201") + "/api/swap/report";
@@ -78,6 +84,7 @@ async function fillApt(aptos: Aptos, solver: Account, recipient: string, octas: 
       function: "0x1::aptos_account::transfer",
       functionArguments: [to, octas.toString()],
     },
+    options: { maxGasAmount: SOLVER_MAX_GAS },
   });
   const r = await aptos.signAndSubmitTransaction({ signer: solver, transaction: txn });
   const res = await aptos.waitForTransaction({ transactionHash: r.hash });
@@ -88,6 +95,14 @@ async function handleSwap(client: EvmClient, aptos: Aptos, solverAcct: Account, 
   const key = `${swapId}`;
   if (store.legs[key]?.status === "settled" || store.legs[key]?.status === "claimed") {
     console.log(`skip swap ${key} (already ${store.legs[key].status})`);
+    return;
+  }
+  // Already quoted, awaiting auction finalize: the sweep owns it from here.
+  // Without this, retry sweeps re-submit the identical quote and hit the
+  // improve-only revert (observed on Fly 2026-10-29: attempts 2/3 reverted).
+  // (status "filled" WITH an aptosTx = EVM fill done: proceed to claim.)
+  if (store.legs[key]?.status === "filled" && !store.legs[key].aptosTx) {
+    console.log(`skip swap ${key} (already quoted, awaiting finalize)`);
     return;
   }
   // CRASH-SAFE RESUME: a previous run may have filled on Aptos but died
@@ -518,6 +533,7 @@ async function handleReverseSwap(
       function: `${admin}::swap_escrow::claim`,
       functionArguments: [admin, swapId.toString(), fillHashBytes, quoted.toString()],
     },
+    options: { maxGasAmount: SOLVER_MAX_GAS },
   });
   const claimRes = await aptos.signAndSubmitTransaction({ signer: solverAcct, transaction: claimTxn });
   await aptos.waitForTransaction({ transactionHash: claimRes.hash });
@@ -547,6 +563,7 @@ async function reverseSettleSweep(aptos: Aptos, solverAcct: Account) {
       const txn = await aptos.transaction.build.simple({
         sender: solverAcct.accountAddress,
         data: { function: `${admin}::swap_escrow::settle`, functionArguments: [admin, swapId.toString()] },
+      options: { maxGasAmount: SOLVER_MAX_GAS },
       });
       const res = await aptos.signAndSubmitTransaction({ signer: solverAcct, transaction: txn });
       await aptos.waitForTransaction({ transactionHash: res.hash });
