@@ -331,6 +331,27 @@ async function main() {
       // run quoted (eth_getLogs is unreliable on Maroo; see above). A
       // wipe-restart may miss older wins; they remain claimable manually.
       if (AUCTION !== null) await auctionSweep(client, aptos, solverAcct, wallet);
+      // Failure-retry sweep: the id cursor only moves forward, so a swap
+      // that failed mid-tick would never be re-encountered by the scan.
+      // Retry recorded failures here (same 3-strike accounting as the scan).
+      for (const failKey of Object.keys(store.failures ?? {})) {
+        const isReverse = failKey.startsWith("r");
+        const id = BigInt(isReverse ? failKey.slice(1) : failKey);
+        try {
+          if (isReverse) await handleReverseSwap(client, aptos, solverAcct, wallet, id);
+          else await handleSwap(client, aptos, solverAcct, wallet, id, 0n);
+          delete (store.failures as Record<string, number>)[failKey];
+        } catch (e) {
+          const n = ((store.failures?.[failKey] ?? 0) + 1);
+          store.failures = { ...store.failures, [failKey]: n };
+          console.error(`retry ${failKey} failed (attempt ${n}/3): ${(e as Error).message.slice(0, 150)}`);
+          if (n >= 3) {
+            store.legs[failKey] = { status: "skipped", detail: `failed ${n}x: ${(e as Error).message.slice(0, 120)}` };
+            delete store.failures[failKey];
+          }
+          saveStore(store);
+        }
+      }
       lastSwapId = end;
       store.lastSwapId = end.toString();
       saveStore(store as Parameters<typeof saveStore>[0] & Record<string, unknown>);
