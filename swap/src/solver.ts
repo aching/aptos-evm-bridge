@@ -318,7 +318,9 @@ async function main() {
         // stranded wins still get filled.
         if (AUCTION !== null) {
           await auctionSweep(client, aptos, solverAcct, wallet);
-          const wins = await getAuctionWins(client, AUCTION, evmAccount.address, lastBlock + 1n > 2000n ? lastBlock + 1n - 2000n : 0n, head);
+          // Win discovery backfill is bounded (200 blocks): with Maroo's
+          // 8-block log windows a deeper scan costs too many RPCs per tick.
+          const wins = await getAuctionWins(client, AUCTION, evmAccount.address, lastBlock + 1n > 200n ? lastBlock + 1n - 200n : 0n, head);
           for (const swapId of wins) {
             const k = `${swapId}`;
             if (store.legs[k]?.status === "claimed" || store.legs[k]?.status === "settled" ||

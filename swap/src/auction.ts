@@ -35,22 +35,32 @@ export async function getAuctionWins(
   fromBlock: bigint,
   toBlock: bigint,
 ): Promise<bigint[]> {
-  const STEP = 500n;
+  // 8-block windows + shrink-on-failure, same as getSwapLocks: Maroo
+  // rejects wider ranges from some served nodes (observed from Fly).
   const out: bigint[] = [];
   const want = winner.toLowerCase();
-  for (let from = fromBlock; from <= toBlock; from += STEP) {
-    const to = from + STEP - 1n > toBlock ? toBlock : from + STEP - 1n;
-    const logs = await client.getContractEvents({
-      address: auction,
-      abi: AUCTION_ABI,
-      eventName: "AuctionFinalized",
-      fromBlock: from,
-      toBlock: to,
-    });
-    for (const l of logs) {
-      if ((l.args.winner as string).toLowerCase() === want) {
-        out.push(l.args.swapId as bigint);
+  let size = 8n;
+  let from = fromBlock;
+  while (from <= toBlock) {
+    const to = from + size - 1n > toBlock ? toBlock : from + size - 1n;
+    try {
+      const logs = await client.getContractEvents({
+        address: auction,
+        abi: AUCTION_ABI,
+        eventName: "AuctionFinalized",
+        fromBlock: from,
+        toBlock: to,
+      });
+      for (const l of logs) {
+        if ((l.args.winner as string).toLowerCase() === want) {
+          out.push(l.args.swapId as bigint);
+        }
       }
+      from = to + 1n;
+      if (size < 8n) size = 8n;
+    } catch {
+      if (size > 1n) { size = size / 2n; continue; }
+      throw new Error(`getAuctionWins failed at block ${from} (Maroo RPC gap?)`);
     }
   }
   return out;
