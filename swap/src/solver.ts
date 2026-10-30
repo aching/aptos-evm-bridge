@@ -294,9 +294,9 @@ async function main() {
       // "tx not found" on arbitrary windows, observed live from Fly
       // 2026-10-29), while eth_call views are rock-solid. nextSwapId is
       // monotonic, so ranging (cursor, head] misses nothing.
-      const headId = await client.readContract({
-        address: ESCROW, abi: ESCROW_WRITE_ABI, functionName: "nextSwapId",
-      }) as bigint;
+      // Retry views: Maroo's LB serves occasional empty responses ("0x")
+      // for eth_call too — 3 quick attempts before failing the tick.
+      const headId = await readNextSwapId(client);
       const from = lastSwapId + 1n;
       const to = headId;
       if (to > from + 50n) {
@@ -346,6 +346,22 @@ async function main() {
     }
     await new Promise((r) => setTimeout(r, 5000));
   }
+}
+
+/// Read nextSwapId with retries (Maroo LB flakiness, Fly 2026-10-29).
+async function readNextSwapId(client: EvmClient): Promise<bigint> {
+  let lastErr: unknown = null;
+  for (let a = 0; a < 3; a++) {
+    try {
+      return await client.readContract({
+        address: ESCROW, abi: ESCROW_WRITE_ABI, functionName: "nextSwapId",
+      }) as bigint;
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  throw lastErr;
 }
 
 /// One reverse poll tick: discover new locks by counter, handle each with
