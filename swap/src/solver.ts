@@ -227,7 +227,15 @@ async function handleSwap(client: EvmClient, aptos: Aptos, solverAcct: Account, 
       await report(swapId, "skipped", `insufficient APT inventory ${inv} < ${quoted} — fund solver`);
       return;
     }
-    aptosTx = await fillApt(aptos, solverAcct, s.aptosRecipient, quoted);
+    aptosTx = "";
+    try {
+      aptosTx = await fillApt(aptos, solverAcct, s.aptosRecipient, quoted);
+    } catch (e) {
+      // FULL error to logs (not sliced): Aptos validation failures need the
+      // complete code to diagnose (Fly 2026-10-29: 150-char slices hid it).
+      console.error(`fill swap ${key} FAILED:`, JSON.stringify(e, Object.getOwnPropertyNames(e as object)).slice(0, 2000));
+      throw e;
+    }
     console.log(`filled on Aptos: ${aptosTx}`);
     store.legs[key] = { status: "filled", aptosTx, detail: `paid ${quoted} octas` };
     saveStore(store);
