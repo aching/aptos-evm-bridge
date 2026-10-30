@@ -380,24 +380,23 @@ async function main() {
     } catch (e) {
       console.error("poll error:", (e as Error).message);
     }
-    await new Promise((r) => setTimeout(r, 5000));
+    const interval = Number(process.env.POLL_INTERVAL_MS ?? 15_000);
+    await new Promise((r) => setTimeout(r, interval));
   }
 }
 
-/// Read nextSwapId with retries (Maroo LB flakiness, Fly 2026-10-29).
+/// Read nextSwapId with one spaced retry (burst retries worsen throttling).
 async function readNextSwapId(client: EvmClient): Promise<bigint> {
-  let lastErr: unknown = null;
-  for (let a = 0; a < 3; a++) {
-    try {
-      return await client.readContract({
-        address: ESCROW, abi: ESCROW_WRITE_ABI, functionName: "nextSwapId",
-      }) as bigint;
-    } catch (e) {
-      lastErr = e;
-      await new Promise((r) => setTimeout(r, 1500));
-    }
+  try {
+    return await client.readContract({
+      address: ESCROW, abi: ESCROW_WRITE_ABI, functionName: "nextSwapId",
+    }) as bigint;
+  } catch (e) {
+    await new Promise((r) => setTimeout(r, 3000));
+    return await client.readContract({
+      address: ESCROW, abi: ESCROW_WRITE_ABI, functionName: "nextSwapId",
+    }) as bigint;
   }
-  throw lastErr;
 }
 
 /// One reverse poll tick: discover new locks by counter, handle each with
@@ -406,6 +405,10 @@ async function readNextSwapId(client: EvmClient): Promise<bigint> {
 /// Counter-based discovery (NOT event polling): the api.testnet.aptoslabs.com
 /// indexer serves no `events` table, so ts-sdk getEvents is unusable here.
 /// next_swap_id is monotonic — ranging (cursor, head] misses nothing.
+/// Tick cadence (POLL_INTERVAL_MS, default 15s) is deliberately gentle:
+/// public RPCs (Maroo + Aptos fullnode) throttle burst pollers — observed
+/// live from Fly 2026-10-29 as progressive degradation that clears after a
+/// cooldown. Fills land within ~30s, well inside demo tolerance.
 async function reverseTick(
   client: EvmClient,
   aptos: Aptos,
