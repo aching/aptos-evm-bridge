@@ -552,11 +552,15 @@ async function auctionSweep(client: EvmClient, aptos: Aptos, solverAcct: Account
       if (!finalized) {
         // Attempt finalize; reverts if the auction window is still open or
         // someone else already finalized — both are fine, next tick retries.
+        // AWAIT the receipt: winner is only readable after mining. Reading
+        // too early yields 0x0 and strands the swap as "won by nobody"
+        // (observed live on Maroo 2026-10-29 — broadcast != mined).
         try {
-          await (wallet as unknown as { writeContract: (a: any) => Promise<`0x${string}`> }).writeContract({
+          const finHash = await (wallet as unknown as { writeContract: (a: any) => Promise<`0x${string}`> }).writeContract({
             address: AUCTION!, abi: AUCTION_ABI, functionName: "finalize", args: [swapId],
             account: (wallet as any).account, chain: undefined,
           });
+          await client.waitForTransactionReceipt({ hash: finHash });
         } catch (e) {
           console.log(`auction ${key}: finalize not ready (${(e as Error).message.slice(0, 80)})`);
           continue;
@@ -565,6 +569,12 @@ async function auctionSweep(client: EvmClient, aptos: Aptos, solverAcct: Account
       const winner = await client.readContract({
         address: AUCTION!, abi: AUCTION_ABI, functionName: "winner", args: [swapId],
       }) as Address;
+      if (winner === "0x0000000000000000000000000000000000000000") {
+        // Finalize broadcast but not yet visible (receipt pending on a lagging
+        // node): retry next tick, NEVER skip — 0x0 is "not yet", not "nobody".
+        console.log(`auction ${key}: winner not yet visible, retrying next tick`);
+        continue;
+      }
       if (winner.toLowerCase() !== evmAccount.address.toLowerCase()) {
         console.log(`auction ${key}: won by ${winner}, skipping fill`);
         store.legs[key] = { status: "skipped", detail: `auction won by ${winner}` };
