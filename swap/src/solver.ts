@@ -280,8 +280,14 @@ async function main() {
   for (;;) {
     try {
       const head = await client.getBlockNumber();
-      if (head > lastBlock) {
-        const locks = await getSwapLocks(client, ESCROW, lastBlock + 1n, head);
+      // TIP-LAG GUARD: Maroo's public RPC load-balances across nodes that
+      // disagree about the tip ("invalid block range params" / "tx not
+      // found" on the freshest blocks, observed live from Fly 2026-10-29).
+      // Scan only up to head-5; the 5-block lag self-heals as nodes converge.
+      // Anvil (test env) mines on demand — no lag when head is tiny.
+      const safeHead = head > 10n ? head - 5n : head;
+      if (safeHead > lastBlock) {
+        const locks = await getSwapLocks(client, ESCROW, lastBlock + 1n, safeHead);
         // Per-swap isolation + poison-swap guard: one swap's failure must
         // never wedge the cursor (observed 2026-10-09: swap 0's reverting
         // quote blocked lastBlock forever, retried every tick). Failures are
@@ -325,8 +331,8 @@ async function main() {
             }
           }
         }
-        lastBlock = head;
-        store.lastBlock = head.toString();
+        lastBlock = safeHead;
+        store.lastBlock = safeHead.toString();
         saveStore(store);
       }
       // ---------------- reverse direction (APT -> ETH) ----------------
