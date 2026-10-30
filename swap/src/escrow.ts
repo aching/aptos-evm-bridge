@@ -83,28 +83,40 @@ export async function getSwapLocks(
   // ranges ("invalid block range params") — observed live 2026-10-29 from
   // Fly (the bridge relayer learned this 2026-10-09). Anvil tolerates
   // anything, so one small window size serves both chains.
-  const STEP = 8n;
+  // Shrink-on-failure: some Maroo nodes reject even 8-block ranges or lack
+  // receipts for the tip ("tx not found"). Halve down to single blocks
+  // before giving up — the tick retries in 5s and the cursor only advances
+  // on success, so nothing is ever skipped.
   const out: SwapEvent[] = [];
-  for (let from = fromBlock; from <= toBlock; from += STEP) {
-    const to = from + STEP - 1n > toBlock ? toBlock : from + STEP - 1n;
-    const logs = await client.getContractEvents({
-      address: escrow,
-      abi: ESCROW_ABI,
-      eventName: "SwapLocked",
-      fromBlock: from,
-      toBlock: to,
-    });
-    for (const l of logs) {
-      out.push({
-        swapId: l.args.swapId as bigint,
-        user: l.args.user as Address,
-        aptosRecipient: l.args.aptosRecipient as string,
-        amount: l.args.amount as bigint,
-        minOut: l.args.minOut as bigint,
-        deadline: l.args.deadline as bigint,
-        txHash: l.transactionHash as Hash,
-        blockNumber: l.blockNumber,
+  let size = 8n;
+  let from = fromBlock;
+  while (from <= toBlock) {
+    const to = from + size - 1n > toBlock ? toBlock : from + size - 1n;
+    try {
+      const logs = await client.getContractEvents({
+        address: escrow,
+        abi: ESCROW_ABI,
+        eventName: "SwapLocked",
+        fromBlock: from,
+        toBlock: to,
       });
+      for (const l of logs) {
+        out.push({
+          swapId: l.args.swapId as bigint,
+          user: l.args.user as Address,
+          aptosRecipient: l.args.aptosRecipient as string,
+          amount: l.args.amount as bigint,
+          minOut: l.args.minOut as bigint,
+          deadline: l.args.deadline as bigint,
+          txHash: l.transactionHash as Hash,
+          blockNumber: l.blockNumber,
+        });
+      }
+      from = to + 1n;
+      if (size < 8n) size = 8n; // recover after a bad patch
+    } catch (e) {
+      if (size > 1n) { size = size / 2n; continue; }
+      throw e; // single block still failing: RPC node gap, retry next tick
     }
   }
   return out;
