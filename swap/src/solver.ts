@@ -49,12 +49,12 @@ async function report(swapId: bigint | number | string | null, step: string, det
 // --- tiny JSON store (swapId legs + consecutive-failure counts) --
 interface Leg { status: "seen" | "filled" | "claimed" | "settled" | "skipped"; aptosTx?: string; detail: string }
 const storeFile = path.join(DATA_DIR, "solver-state.json");
-function loadStore(): { lastBlock: string | null; legs: Record<string, Leg>; failures: Record<string, number> } {
+function loadStore(): { lastBlock: string | null; legs: Record<string, Leg>; failures: Record<string, number>; lastSwapId?: string } {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   try { return { lastBlock: null, legs: {}, failures: {}, ...JSON.parse(fs.readFileSync(storeFile, "utf8")) }; }
   catch { return { lastBlock: null, legs: {}, failures: {} }; }
 }
-function saveStore(s: { lastBlock: string | null; legs: Record<string, Leg>; failures?: Record<string, number> }) {
+function saveStore(s: { lastBlock: string | null; legs: Record<string, Leg>; failures?: Record<string, number>; lastSwapId?: string }) {
   fs.writeFileSync(storeFile + ".tmp", JSON.stringify(s, null, 1));
   fs.renameSync(storeFile + ".tmp", storeFile);
 }
@@ -277,80 +277,63 @@ async function main() {
   }
   console.log(`escrow solver role confirmed: ${evmAccount.address}`);
 
-  let lastBlock: bigint;
-  if (process.env.SWAP_START_BLOCK) lastBlock = BigInt(process.env.SWAP_START_BLOCK);
-  else if (store.lastBlock !== null) lastBlock = BigInt(store.lastBlock);
-  else {
-    // Cold start (fresh store — e.g. after a redeploy wipes ephemeral disk):
-    // scan back a bounded window instead of starting at head, or in-flight
-    // swaps lock in before the restart and strand forever behind the cursor
-    // (observed on Fly 2026-10-29: two redeploys stranded swaps 0 and 1).
-    // 500 blocks ≈ recent demo history; 8-block Maroo windows ≈ 63 RPCs.
-    const head0 = await client.getBlockNumber();
-    lastBlock = head0 > 500n ? head0 - 500n : 0n;
-    console.log(`cold start: scanning back 500 blocks from ${head0}`);
-  }
+  // Forward cursor = last handled swap id (persisted). Fresh store starts at
+  // -1n = "everything since genesis" — the counter covers it in 50-id pages,
+  // so redeploys never strand in-flight swaps (no block-based backfill needed).
+  let lastSwapId: bigint;
+  if (process.env.SWAP_START_ID) lastSwapId = BigInt(process.env.SWAP_START_ID) - 1n;
+  else if ((store as Record<string, unknown>).lastSwapId != null) {
+    lastSwapId = BigInt((store as Record<string, unknown>).lastSwapId as string);
+  } else lastSwapId = -1n;
 
   for (;;) {
     try {
-      const head = await client.getBlockNumber();
-      // TIP-LAG GUARD: Maroo's public RPC load-balances across nodes that
-      // disagree about the tip ("invalid block range params" / "tx not
-      // found" on the freshest blocks, observed live from Fly 2026-10-29).
-      // Scan only up to head-5; the 5-block lag self-heals as nodes converge.
-      // Anvil (test env) mines on demand — no lag when head is tiny.
-      const safeHead = head > 10n ? head - 5n : head;
-      if (safeHead > lastBlock) {
-        const locks = await getSwapLocks(client, ESCROW, lastBlock + 1n, safeHead);
-        // Per-swap isolation + poison-swap guard: one swap's failure must
-        // never wedge the cursor (observed 2026-10-09: swap 0's reverting
-        // quote blocked lastBlock forever, retried every tick). Failures are
-        // counted; after 3 consecutive failures the swap is skipped with the
-        // error recorded. The cursor ALWAYS advances past scanned blocks.
-        for (const l of locks) {
-          const k = `${l.swapId}`;
-          try {
-            await handleSwap(client, aptos, solverAcct, wallet, l.swapId, l.blockNumber);
-            delete store.failures?.[k];
-          } catch (e) {
-            const n = ((store.failures?.[k] ?? 0) + 1);
-            store.failures = { ...store.failures, [k]: n };
-            console.error(`swap ${k} failed (attempt ${n}/3): ${(e as Error).message.slice(0, 150)}`);
-            await report(l.swapId, "failed", `attempt ${n}/3: ${(e as Error).message.slice(0, 120)}`);
-            if (n >= 3) {
-              store.legs[k] = { status: "skipped", detail: `failed ${n}x: ${(e as Error).message.slice(0, 120)}` };
-              delete store.failures[k];
-            }
-            saveStore(store);
-          }
-        }
-        // Auction mode: finalize matured auctions we quoted, fill the ones
-        // we won. Previously this sweep did not exist — quoted swaps sat
-        // unfilled forever ("fill after finalize" with no finalizer).
-        // Plus win discovery: a fresh store (wiped/restarted) may hold no
-        // legs for auctions we already won — scan AuctionFinalized events so
-        // stranded wins still get filled.
-        if (AUCTION !== null) {
-          await auctionSweep(client, aptos, solverAcct, wallet);
-          // Win discovery backfill is bounded (200 blocks): with Maroo's
-          // 8-block log windows a deeper scan costs too many RPCs per tick.
-          const wins = await getAuctionWins(client, AUCTION, evmAccount.address, lastBlock + 1n > 200n ? lastBlock + 1n - 200n : 0n, head);
-          for (const swapId of wins) {
-            const k = `${swapId}`;
-            if (store.legs[k]?.status === "claimed" || store.legs[k]?.status === "settled" ||
-                store.legs[k]?.status === "filled" || store.legs[k]?.status === "skipped") continue;
-            console.log(`discovered auction win for swap ${k}, filling`);
-            try {
-              await handleSwap(client, aptos, solverAcct, wallet, swapId, 0n);
-            } catch (e) {
-              console.error(`win-fill ${k} failed (will retry):`, (e as Error).message.slice(0, 150));
-            }
-          }
-        }
-        lastBlock = safeHead;
-        store.lastBlock = safeHead.toString();
-        saveStore(store);
+      // Lock discovery is COUNTER-BASED (nextSwapId range poll), not
+      // event-based: Maroo's public RPC serves eth_getLogs unreliably
+      // across its load-balanced backends ("invalid block range params" /
+      // "tx not found" on arbitrary windows, observed live from Fly
+      // 2026-10-29), while eth_call views are rock-solid. nextSwapId is
+      // monotonic, so ranging (cursor, head] misses nothing.
+      const headId = await client.readContract({
+        address: ESCROW, abi: ESCROW_WRITE_ABI, functionName: "nextSwapId",
+      }) as bigint;
+      const from = lastSwapId + 1n;
+      const to = headId;
+      if (to > from + 50n) {
+        console.log(`[forward] ${(to - from).toString()} unprocessed swap(s) — catching up 50/tick`);
       }
+      const end = to - from > 50n ? from + 50n : to;
+      // Per-swap isolation + poison-swap guard: one swap's failure must
+      // never wedge the cursor. Failures are counted; after 3 consecutive
+      // failures the swap is skipped with the error recorded. The cursor
+      // ALWAYS advances past handled ids.
+      for (let swapId = from; swapId < end; swapId++) {
+        const k = `${swapId}`;
+        if (store.legs[k]?.status === "claimed" || store.legs[k]?.status === "settled" ||
+            store.legs[k]?.status === "filled" || store.legs[k]?.status === "skipped") continue;
+        try {
+          await handleSwap(client, aptos, solverAcct, wallet, swapId, 0n);
+          delete store.failures?.[k];
+        } catch (e) {
+          const n = ((store.failures?.[k] ?? 0) + 1);
+          store.failures = { ...store.failures, [k]: n };
+          console.error(`swap ${k} failed (attempt ${n}/3): ${(e as Error).message.slice(0, 150)}`);
+          await report(swapId, "failed", `attempt ${n}/3: ${(e as Error).message.slice(0, 120)}`);
+          if (n >= 3) {
+            store.legs[k] = { status: "skipped", detail: `failed ${n}x: ${(e as Error).message.slice(0, 120)}` };
+            delete store.failures[k];
+          }
+          saveStore(store);
+        }
+      }
+      // Auction mode: finalize matured auctions we quoted, fill the ones
+      // we won. NOTE: no event backfill — the sweep covers every leg this
+      // run quoted (eth_getLogs is unreliable on Maroo; see above). A
+      // wipe-restart may miss older wins; they remain claimable manually.
+      if (AUCTION !== null) await auctionSweep(client, aptos, solverAcct, wallet);
+      lastSwapId = end;
+      store.lastSwapId = end.toString();
+      saveStore(store as Parameters<typeof saveStore>[0] & Record<string, unknown>);
       // ---------------- reverse direction (APT -> ETH) ----------------
       // Same daemon, second loop: poll Aptos SwapLocked events, fill ETH on
       // the EVM chain, claim the locked APT, settle after the window.

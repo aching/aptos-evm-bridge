@@ -15,6 +15,7 @@ export const ESCROW_WRITE_ABI = [
   parseAbiItem("function claim(uint64 swapId, bytes32 aptosTxHash, bytes fillRecipient, uint256 fillAmount)"),
   parseAbiItem("function settle(uint64 swapId)"),
   parseAbiItem("function solver() view returns (address)"),
+  parseAbiItem("function nextSwapId() view returns (uint64)"),
   parseAbiItem("function swaps(uint64) view returns (address user, bytes aptosRecipient, uint256 amount, uint256 minOut, uint64 deadline, bool claimed, bool refunded, bytes32 fillHash, uint64 claimableAt, address claimSolver)"),
 ] as const;
 
