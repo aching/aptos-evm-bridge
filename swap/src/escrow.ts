@@ -79,9 +79,11 @@ export async function getSwapLocks(
   fromBlock: bigint,
   toBlock: bigint,
 ): Promise<SwapEvent[]> {
-  // Chunk wide ranges into 500-block windows: public RPCs cap eth_getLogs
-  // ranges, and one oversized call failing would stall the whole poll tick.
-  const STEP = 500n;
+  // Chunk into 8-block windows: Maroo testnet rejects wider eth_getLogs
+  // ranges ("invalid block range params") — observed live 2026-10-29 from
+  // Fly (the bridge relayer learned this 2026-10-09). Anvil tolerates
+  // anything, so one small window size serves both chains.
+  const STEP = 8n;
   const out: SwapEvent[] = [];
   for (let from = fromBlock; from <= toBlock; from += STEP) {
     const to = from + STEP - 1n > toBlock ? toBlock : from + STEP - 1n;
