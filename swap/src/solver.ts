@@ -171,8 +171,14 @@ async function handleSwap(client: EvmClient, aptos: Aptos, solverAcct: Account, 
     }
     if (!wonAlready) {
     const w = wallet as unknown as { writeContract: (a: any) => Promise<`0x${string}`> };
+    // Notify-then-quote ordering: writeContract returns on BROADCAST, not on
+    // mining. On instant chains (Anvil) the notify is mined before the quote
+    // simulates; on real chains (Maroo) the quote's preflight simulates
+    // against pre-notify state (lockTime 0 -> AuctionClosed). Await the
+    // notify receipt first — observed live on Maroo 2026-10-29.
     try {
-      await w.writeContract({ address: AUCTION, abi: AUCTION_ABI, functionName: "notifyLock", args: [swapId], account: (wallet as any).account, chain: undefined });
+      const notifyHash = await w.writeContract({ address: AUCTION, abi: AUCTION_ABI, functionName: "notifyLock", args: [swapId], account: (wallet as any).account, chain: undefined });
+      await client.waitForTransactionReceipt({ hash: notifyHash });
     } catch { /* already notified */ }
     await w.writeContract({
       address: AUCTION, abi: AUCTION_ABI, functionName: "submitQuote",
