@@ -17,6 +17,8 @@ primary_region = 'nrt'
   processes = ['swap']
 
 # solver: no public ports (polls Maroo + Aptos, reports to the swap server).
+# Kept always-on via `fly machine update --autostop=false` (nothing wakes a
+# portless process under scale-to-zero).
 
 [[vm]]
   memory = '1gb'
